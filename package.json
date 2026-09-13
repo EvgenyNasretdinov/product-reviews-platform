@@ -9,7 +9,10 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:unit": "turbo run test:unit",
-    "test:integration": "turbo run test:integration"
+    "test:integration": "turbo run test:integration",
+    "infra:up": "docker compose -f docker-compose.dev.yml up -d --wait",
+    "infra:down": "docker compose -f docker-compose.dev.yml down -v",
+    "infra:check": "./scripts/check-infra.sh"
   },
   "devDependencies": {
     "turbo": "^2.3.0",
