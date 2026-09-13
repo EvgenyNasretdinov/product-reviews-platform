@@ -20,7 +20,9 @@ export type CreateReviewInput = z.infer<typeof createReviewInputSchema>;
 
 export const updateReviewInputSchema = createReviewInputSchema
   .partial()
-  .refine((patch) => Object.keys(patch).length > 0, { message: 'at least one field must be provided' });
+  .refine((patch) => Object.values(patch).some((v) => v !== undefined), {
+    message: 'at least one field must be provided',
+  });
 export type UpdateReviewInput = z.infer<typeof updateReviewInputSchema>;
 
 export const reviewDtoSchema = z.object({

@@ -30,6 +30,16 @@ describe('updateReviewInputSchema', () => {
     expect(() => updateReviewInputSchema.parse({})).toThrow();
   });
 
+  it('rejects a patch whose only field is explicitly undefined', () => {
+    expect(() => updateReviewInputSchema.parse({ rating: undefined })).toThrow();
+  });
+
+  it('rejects a patch where every field is explicitly undefined', () => {
+    expect(() =>
+      updateReviewInputSchema.parse({ rating: undefined, title: undefined, body: undefined }),
+    ).toThrow();
+  });
+
   it('accepts a rating-only patch', () => {
     expect(updateReviewInputSchema.parse({ rating: 3 })).toEqual({ rating: 3 });
   });
