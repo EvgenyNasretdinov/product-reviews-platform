@@ -344,6 +344,18 @@ describe('updateReviewInputSchema', () => {
     expect(() => updateReviewInputSchema.parse({})).toThrow();
   });
 
+  // Zod keeps a key in the parsed output whenever it was present in the input, even when its
+  // value is undefined. A guard written over Object.keys therefore counts these as real edits.
+  it('rejects a patch whose only field is undefined', () => {
+    expect(() => updateReviewInputSchema.parse({ rating: undefined })).toThrow();
+  });
+
+  it('rejects a patch whose every field is undefined', () => {
+    expect(() =>
+      updateReviewInputSchema.parse({ rating: undefined, title: undefined, body: undefined }),
+    ).toThrow();
+  });
+
   it('accepts a rating-only patch', () => {
     expect(updateReviewInputSchema.parse({ rating: 3 })).toEqual({ rating: 3 });
   });
@@ -368,6 +380,24 @@ import { EVENT_TYPES, eventEnvelopeSchema, reviewSubmittedPayloadSchema } from '
 
 const envelope = eventEnvelopeSchema(reviewSubmittedPayloadSchema);
 
+const validSubmittedEnvelope = {
+  eventId: '0193a6f0-0000-7000-8000-000000000001',
+  eventType: EVENT_TYPES.REVIEW_SUBMITTED,
+  version: 1,
+  occurredAt: '2026-09-13T10:00:00.000Z',
+  aggregateType: 'review',
+  aggregateId: '0193a6f0-0000-7000-8000-000000000002',
+  payload: {
+    reviewId: '0193a6f0-0000-7000-8000-000000000002',
+    productId: '0193a6f0-0000-7000-8000-000000000003',
+    authorId: '0193a6f0-0000-7000-8000-000000000004',
+    rating: 5,
+    title: 'Great',
+    body: 'Long enough body text.',
+    verifiedPurchase: true,
+  },
+};
+
 describe('eventEnvelopeSchema', () => {
   it('parses a submitted event and coerces occurredAt to a Date', () => {
     const parsed = envelope.parse({
@@ -390,8 +420,10 @@ describe('eventEnvelopeSchema', () => {
     expect(parsed.occurredAt).toBeInstanceOf(Date);
   });
 
+  // Change ONLY the version. Passing a bare { version: 2 } would throw because every other
+  // required field is missing, and the assertion would pass against an unconstrained z.number().
   it('rejects an envelope whose version is unknown', () => {
-    expect(() => envelope.parse({ version: 2 })).toThrow();
+    expect(() => envelope.parse({ ...validSubmittedEnvelope, version: 2 })).toThrow();
   });
 });
 ```
@@ -417,7 +449,9 @@ export const createReviewInputSchema = z.object({
 
 export const updateReviewInputSchema = createReviewInputSchema
   .partial()
-  .refine((patch) => Object.keys(patch).length > 0, { message: 'at least one field must be provided' });
+  .refine((patch) => Object.values(patch).some((v) => v !== undefined), {
+    message: 'at least one field must be provided',
+  });
 
 export const reviewSortSchema = z
   .enum(['helpful', 'newest', 'rating_desc', 'rating_asc'])
