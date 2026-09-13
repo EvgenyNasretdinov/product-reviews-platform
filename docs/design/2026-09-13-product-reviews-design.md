@@ -64,10 +64,15 @@ the event and the state change share one transaction, and the relay guarantees
 at-least-once delivery.
 
 `FOR UPDATE SKIP LOCKED` lets several relay instances drain the outbox concurrently
-without handing the same row to two of them. Publish failures are retried with exponential
-backoff; after 5 attempts the row is parked (`attempts` exceeded) and the message is
-routed to a dead-letter queue, which is inspectable in the RabbitMQ management UI that
-`docker compose` brings up.
+without handing the same row to two of them.
+
+Failure is handled differently on either side of the broker, and the two paths should not
+be confused. A **publish** failure in the relay increments `outbox.attempts` and records
+`last_error`; after 5 attempts the row is parked — excluded from polling, retained for
+inspection, and logged at error level. A **handler** failure in a consumer nacks the
+message without requeueing it, and the broker routes it to that queue's dead-letter queue,
+which is inspectable in the RabbitMQ management UI that `docker compose` brings up.
+Requeueing a message that failed on its own content simply starves the queue behind it.
 
 ### 2.2 Idempotency
 
