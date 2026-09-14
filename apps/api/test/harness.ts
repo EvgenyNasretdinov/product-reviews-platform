@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, inject } from 'vitest';
 import { AppModule } from '../src/app.module.js';
 import { hashPassword } from '../src/auth/password.js';
 import { configureApp } from '../src/bootstrap.js';
+import { CacheService } from '../src/common/cache/cache.service.js';
 import { PrismaService } from '../src/common/prisma/prisma.service.js';
 
 export interface TestApp {
@@ -115,6 +116,7 @@ export async function createTestApp(envOverrides: Record<string, string> = {}): 
   await app.init();
 
   const prisma = app.get(PrismaService);
+  const cache = app.get(CacheService);
   // INestApplication#getHttpServer() is typed `any`; narrow it once here so
   // no `any` leaks into the exported TestApp shape.
   const httpServer = app.getHttpServer() as Server;
@@ -123,6 +125,16 @@ export async function createTestApp(envOverrides: Record<string, string> = {}): 
     await prisma.$executeRawUnsafe(
       'TRUNCATE TABLE outbox, review_votes, reviews, product_rating_summary, purchases, products, users RESTART IDENTITY CASCADE',
     );
+    // One Redis container is shared by every integration file in this
+    // worker, so a cache entry left behind by an earlier test would
+    // otherwise survive a fully truncated, freshly re-seeded database and
+    // silently hand a later, unrelated test a stale DTO for a slug/id it
+    // reused — exactly the "stale cache, no error, no failing test" failure
+    // this plan's caching task warns about, just relocated into this
+    // suite. `delByPrefix('')` matches every key (`${''}*` is `*`), which
+    // is how this reuses the existing "no KEYS" SCAN seam instead of
+    // reaching for a separate `FLUSHDB` path.
+    await cache.delByPrefix('');
   };
 
   const loginAs = async (email: string): Promise<string> => {

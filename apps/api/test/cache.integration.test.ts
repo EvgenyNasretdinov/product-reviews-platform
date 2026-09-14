@@ -1,10 +1,30 @@
+import { randomUUID } from 'node:crypto';
 import { cacheKeys } from '@reviews/contracts';
+import type { Redis } from 'ioredis';
 import { describe, expect, it, vi } from 'vitest';
 import { CacheService } from '../src/common/cache/cache.service.js';
+import { REDIS_CLIENT } from '../src/common/redis/redis.constants.js';
 import { createProduct } from './fixtures.js';
-import { setupTestApp, type TestContext } from './harness.js';
+import { createTestApp, setupTestApp, type TestContext } from './harness.js';
 
 const ctx = setupTestApp();
+
+/**
+ * Walks a keyspace with batched `SCAN` and collects every matching key —
+ * the same "no `KEYS`" discipline `RedisCacheService.delByPrefix` follows
+ * in production, reused here purely as a test assertion helper so this
+ * file doesn't reach for the one command that discipline exists to avoid.
+ */
+async function scanAll(redis: Redis, pattern: string): Promise<string[]> {
+  const found: string[] = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 1000);
+    cursor = nextCursor;
+    found.push(...keys);
+  } while (cursor !== '0');
+  return found;
+}
 
 /**
  * `vi.spyOn(ctx.prisma.product, 'findUnique')` alone breaks the query it
@@ -94,5 +114,87 @@ describe('product detail cache-aside', () => {
     const cached = await ctx.request.get(`/api/v1/products/${product.slug}`).expect(200);
 
     expect(cached.body).toEqual(uncached.body);
+  });
+});
+
+describe('cache resilience', () => {
+  // A cache is an optional accelerator, not a hard dependency — a Redis
+  // blip must fall through to Postgres, not 500 the hottest read route in
+  // the catalogue. `RedisModule` sets `maxRetriesPerRequest: 1` precisely
+  // so a hung Redis fails fast; ProductsService must actually catch that
+  // fast failure rather than let it propagate. Uses `createTestApp`
+  // directly (not the shared `ctx`) because only this one test needs a
+  // deliberately unreachable Redis — see health.integration.test.ts for
+  // the same pattern against port 1, a reserved, near-universally-closed
+  // port that fails fast with ECONNREFUSED instead of hanging.
+  it('serves the product from Postgres when Redis is unreachable', async () => {
+    const broken = await createTestApp({ REDIS_URL: 'redis://127.0.0.1:1' });
+    try {
+      const product = await createProduct(broken.prisma, {
+        slug: 'cache-down-fallback',
+        name: 'Cache Down Fallback',
+      });
+
+      const res = await broken.request.get(`/api/v1/products/${product.slug}`).expect(200);
+
+      expect(res.body).toMatchObject({ id: product.id, slug: product.slug, name: product.name });
+    } finally {
+      await broken.close();
+    }
+  });
+});
+
+describe('harness truncate() and the cache', () => {
+  // The enforced-truncation guarantee (every table empty between tests) is
+  // only as good as the stores it actually covers. This proves `truncate()`
+  // covers Redis too, not just Postgres — without it, a cache entry planted
+  // by one test (or one file, since every integration file in this worker
+  // shares one Redis container) would survive into the next and could serve
+  // a stale DTO with nothing at the failure site pointing at caching.
+  it('also clears any cache entry that survived the test', async () => {
+    const testApp = await createTestApp();
+    try {
+      const cache = testApp.app.get(CacheService);
+      await cache.set('cache.integration.test:truncate-probe', 'still-here', 60);
+
+      await testApp.truncate();
+
+      await expect(cache.get('cache.integration.test:truncate-probe')).resolves.toBeNull();
+    } finally {
+      await testApp.close();
+    }
+  });
+});
+
+describe('RedisCacheService.delByPrefix against real Redis', () => {
+  // The in-memory implementation's delByPrefix is unit-tested, but its
+  // logic (filter + delete over an in-process Map) proves nothing about
+  // the Redis implementation's SCAN cursor loop — cursor progression,
+  // termination, and batching are the one piece of this task with
+  // non-obvious semantics, and the piece most likely to be wrong in a way
+  // reading the code doesn't reveal. Seeding comfortably more keys than
+  // the 500-key SCAN COUNT hint makes more than one round trip through the
+  // cursor loop's `do/while` a near-certainty against a real server.
+  it('deletes every matching key across multiple SCAN pages, leaving unrelated keys untouched', async () => {
+    const cache = ctx.app.get(CacheService);
+    const redis = ctx.app.get<Redis>(REDIS_CLIENT);
+    const prefix = `test:scan-prefix:${randomUUID()}:`;
+    const matchingCount = 2500;
+
+    const pipeline = redis.pipeline();
+    for (let i = 0; i < matchingCount; i += 1) {
+      pipeline.set(`${prefix}${i}`, 'x');
+    }
+    const unrelatedKey = `test:scan-prefix:unrelated:${randomUUID()}`;
+    pipeline.set(unrelatedKey, 'keep-me');
+    await pipeline.exec();
+
+    await cache.delByPrefix(prefix);
+
+    const remainingMatching = await scanAll(redis, `${prefix}*`);
+    expect(remainingMatching).toHaveLength(0);
+    expect(await redis.get(unrelatedKey)).toBe('keep-me');
+
+    await redis.del(unrelatedKey);
   });
 });

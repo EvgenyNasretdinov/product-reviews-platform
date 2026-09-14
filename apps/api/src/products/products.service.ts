@@ -1,8 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { paginatedSchema, productDetailDtoSchema, type ProductDetailDto } from '@reviews/contracts';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { cacheKeys, paginatedSchema, productDetailDtoSchema, TTL_PRODUCT_DETAIL, type ProductDetailDto } from '@reviews/contracts';
 import type { z } from 'zod';
 import { CacheService } from '../common/cache/cache.service.js';
-import { cacheKeys, TTL_PRODUCT_DETAIL } from '../common/cache/cache.keys.js';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toProductDetailDto } from './products.mapper.js';
 import { ProductsRepository } from './products.repository.js';
@@ -25,6 +24,8 @@ export type ListProductsResult = z.infer<typeof productListSchema>;
 
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     private readonly repository: ProductsRepository,
     private readonly cache: CacheService,
@@ -47,10 +48,21 @@ export class ProductsService {
    * returning. This is the hottest read in the catalogue — a product page
    * — and it changes only when moderation publishes a review, so serving a
    * `TTL_PRODUCT_DETAIL`-second-stale copy is the right trade, not a bug.
+   *
+   * The cache read and write are both guarded: a cache is an optional
+   * accelerator, and `RedisModule` deliberately sets `maxRetriesPerRequest:
+   * 1` so a hung Redis fails fast rather than hanging the request — but
+   * "fails fast" still means it *throws*. Left unguarded, a transient Redis
+   * blip (not even a full outage) would 500 the single hottest read route
+   * in the catalogue even though Postgres is perfectly capable of serving
+   * it. Catching here and falling through to the repository is what keeps
+   * the cache a strict improvement over no cache, never a regression from
+   * it — see `test/cache.integration.test.ts`'s "serves the product from
+   * Postgres when Redis is unreachable" case for the proof.
    */
   async getBySlug(slug: string): Promise<ProductDetailDto> {
     const key = cacheKeys.productDetail(slug);
-    const cached = await this.cache.get<ProductDetailDto>(key);
+    const cached = await this.safeCacheGet<ProductDetailDto>(key);
     if (cached !== null) {
       return cached;
     }
@@ -60,7 +72,29 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
     const dto = toProductDetailDto(row);
-    await this.cache.set(key, dto, TTL_PRODUCT_DETAIL);
+    await this.safeCacheSet(key, dto, TTL_PRODUCT_DETAIL);
     return dto;
+  }
+
+  private async safeCacheGet<T>(key: string): Promise<T | null> {
+    try {
+      return await this.cache.get<T>(key);
+    } catch (error) {
+      this.logCacheFailure('read', key, error);
+      return null;
+    }
+  }
+
+  private async safeCacheSet<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
+    try {
+      await this.cache.set(key, value, ttlSeconds);
+    } catch (error) {
+      this.logCacheFailure('write', key, error);
+    }
+  }
+
+  private logCacheFailure(operation: 'read' | 'write', key: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`Cache ${operation} failed for "${key}", falling through to Postgres: ${message}`);
   }
 }
