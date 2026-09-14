@@ -37,6 +37,24 @@ function listQueue(token: string, query: Record<string, string> = {}) {
     .auth(token, { type: 'bearer' });
 }
 
+// Matches fixtures.ts's default password hash for createUser (both hardcode
+// 'password123' independently, the same way auth.integration.test.ts's own
+// `PASSWORD` constant does) -- not `ctx.loginAs`, deliberately: `loginAs`
+// upserts by email and always resets `role` to its own default of
+// `CUSTOMER` for any email outside harness.ts's fixed seed map, which would
+// silently downgrade a MODERATOR row created here back to CUSTOMER on
+// login. Creating the user directly with `role: 'MODERATOR'` and then
+// logging in through the raw endpoint (which only reads the row, never
+// writes it) is what keeps the role intact.
+async function loginAsModerator(email: string): Promise<string> {
+  await createUser(ctx.prisma, { email, role: 'MODERATOR' });
+  const res = await ctx.request.post('/api/v1/auth/login').send({ email, password: 'password123' });
+  if (res.status !== 200) {
+    throw new Error(`loginAsModerator(${email}) failed: POST /auth/login returned ${res.status}`);
+  }
+  return (res.body as { accessToken: string }).accessToken;
+}
+
 function decide(reviewId: string, token: string, body: unknown) {
   return ctx.request
     .post(`/api/v1/moderation/reviews/${reviewId}`)
@@ -181,7 +199,14 @@ describe('POST /api/v1/moderation/reviews/:id', () => {
     expect(events.map((e) => e.eventType)).toEqual(['review.rejected']);
   });
 
-  // Case 8.
+  // Case 8 (sequential re-decision): a review already decided, decided
+  // again by a later, separate request. Real and worth keeping, but on its
+  // own this is not proof the guard is a predicated update rather than a
+  // read-then-write -- a single request in flight never opens the race
+  // window a read-then-write loses, so a read-then-write implementation
+  // (read status, check it, then write unconditionally) would pass this
+  // exact assertion identically. See the concurrency case directly below
+  // for the test that actually distinguishes the two.
   it('approving an already-APPROVED review returns 409 and writes no outbox row', async () => {
     const modToken = await ctx.loginAs('mod@example.com');
     const { review } = await seedReview('APPROVED');
@@ -191,4 +216,44 @@ describe('POST /api/v1/moderation/reviews/:id', () => {
     const events = await ctx.prisma.outboxEvent.findMany({ where: { aggregateId: review.id } });
     expect(events).toHaveLength(0);
   });
+
+  // Case 8 (concurrency): the property the brief actually calls case 8 "the
+  // test for". Two distinct moderators decide the same FLAGGED review at
+  // the same moment -- both tokens are resolved before either `decide` call
+  // is dispatched (so login round-trips can't stagger the two requests),
+  // and there is no `await` and no `.expect()` chained onto either call: an
+  // `.expect()` throwing on whichever response loses the race would
+  // short-circuit `Promise.all` and the outbox assertion below would never
+  // run. Same shape as votes.integration.test.ts's "ten concurrent votes"
+  // case.
+  //
+  // Repeated across five freshly seeded reviews inside this one test,
+  // rather than asserted once: a race that passed a single time proves very
+  // little about whether it's actually closed.
+  it(
+    'two moderators approving the same FLAGGED review at once produce exactly one 200, one 409, and one outbox row',
+    async () => {
+      const [modTokenA, modTokenB] = await Promise.all([
+        loginAsModerator('concurrent-mod-a@example.com'),
+        loginAsModerator('concurrent-mod-b@example.com'),
+      ]);
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { review } = await seedReview('FLAGGED');
+
+        const [resA, resB] = await Promise.all([
+          decide(review.id, modTokenA, { decision: 'APPROVED', reason: null }),
+          decide(review.id, modTokenB, { decision: 'APPROVED', reason: null }),
+        ]);
+
+        expect([resA.status, resB.status].sort()).toEqual([200, 409]);
+
+        const events = await ctx.prisma.outboxEvent.findMany({ where: { aggregateId: review.id } });
+        expect(events.map((e) => e.eventType)).toEqual(['review.approved']);
+
+        const updated = await ctx.prisma.review.findUniqueOrThrow({ where: { id: review.id } });
+        expect(updated.status).toBe('APPROVED');
+      }
+    },
+  );
 });
