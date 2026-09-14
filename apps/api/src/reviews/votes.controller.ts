@@ -9,20 +9,13 @@ import {
   ParseUUIDPipe,
   Put,
 } from '@nestjs/common';
-import { voteValueSchema, type VoteValue } from '@reviews/contracts';
-import { z } from 'zod';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { VoteValue } from '@reviews/contracts';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
+import { CastVoteRequestDto, VoteCountsResponseDto, castVoteInputSchema } from './dto/votes.dto.js';
 import type { VoteCounts } from './reviews.repository.js';
 import { VotesService } from './votes.service.js';
-
-/**
- * The body is parsed through this schema rather than a class-validator DTO
- * — the same reason `ReviewsController#submit` parses `@Body() body:
- * unknown` through `createReviewInputSchema`: the global `ValidationPipe`
- * only validates typed class-validator metatypes, so a bare `unknown` body
- * reaches the handler unvalidated otherwise.
- */
-const castVoteInputSchema = z.object({ value: voteValueSchema });
 
 /**
  * No `@Public()` here, on either handler: both require authentication, and
@@ -38,6 +31,8 @@ const castVoteInputSchema = z.object({ value: voteValueSchema });
  * client sent a malformed id. `ParseUUIDPipe` rejects it before it ever
  * reaches the repository.
  */
+@ApiTags('votes')
+@ApiBearerAuth('bearer')
 @Controller('reviews/:reviewId/vote')
 export class VotesController {
   constructor(private readonly votesService: VotesService) {}
@@ -49,6 +44,14 @@ export class VotesController {
    */
   @Put()
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cast (or replace) the caller’s helpfulness vote on a review' })
+  @ApiParam({ name: 'reviewId', type: String, format: 'uuid' })
+  @ApiBody({ type: CastVoteRequestDto })
+  @ApiResponse({ status: 200, type: VoteCountsResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid vote value or malformed reviewId.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'A review’s own author may not vote on it.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'No approved review has this id.' })
   async vote(
     @Param('reviewId', ParseUUIDPipe) reviewId: string,
     @Body() body: unknown,
@@ -70,6 +73,10 @@ export class VotesController {
    */
   @Delete()
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Remove the caller’s helpfulness vote on a review, if any' })
+  @ApiParam({ name: 'reviewId', type: String, format: 'uuid' })
+  @ApiResponse({ status: 204, description: 'Removed, or there was nothing to remove — both are a success.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
   async remove(
     @Param('reviewId', ParseUUIDPipe) reviewId: string,
     @CurrentUser() user: AuthenticatedUser,

@@ -1,9 +1,13 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { loginInputSchema, type SessionUserDto } from '@reviews/contracts';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
 import { AuthService, type LoginResult } from './auth.service.js';
 import { CurrentUser, type AuthenticatedUser } from './decorators/current-user.decorator.js';
 import { Public } from './decorators/public.decorator.js';
+import { LoginRequestDto, LoginResponseDto, SessionUserResponseDto } from './dto/auth.dto.js';
 
+@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -19,6 +23,11 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Sign in with email and password' })
+  @ApiBody({ type: LoginRequestDto })
+  @ApiResponse({ status: 200, type: LoginResponseDto, description: 'Signed in; returns a bearer token and the session user.' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Malformed request body.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Email or password did not match an account.' })
   async login(@Body() body: unknown): Promise<LoginResult> {
     const parsed = loginInputSchema.safeParse(body);
     if (!parsed.success) {
@@ -29,6 +38,10 @@ export class AuthController {
 
   /** Returns the session user for the token on the request. */
   @Get('me')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Return the session user for the current bearer token' })
+  @ApiResponse({ status: 200, type: SessionUserResponseDto })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
   async me(@CurrentUser() user: AuthenticatedUser): Promise<SessionUserDto> {
     return this.authService.getSessionUser(user.id);
   }

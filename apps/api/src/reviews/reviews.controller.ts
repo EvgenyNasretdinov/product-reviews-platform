@@ -13,11 +13,14 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { createReviewInputSchema, reviewSortSchema, updateReviewInputSchema, type ReviewDto } from '@reviews/contracts';
 import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
 import { Public } from '../auth/decorators/public.decorator.js';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
 import { ReviewSubmitThrottlerGuard } from '../common/throttle/throttle.module.js';
+import { CreateReviewRequestDto, ReviewListResponseDto, ReviewResponseDto, UpdateReviewRequestDto } from './dto/reviews.dto.js';
 import { ReviewsService, type ListReviewsResult } from './reviews.service.js';
 
 /**
@@ -43,6 +46,7 @@ const listReviewsQuerySchema = z.object({
 // see votes.controller.ts's doc comment for the fuller version of this
 // reasoning, first found there.
 
+@ApiTags('reviews')
 @Controller('products/:productId/reviews')
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
@@ -56,6 +60,14 @@ export class ReviewsController {
    */
   @Public()
   @Get()
+  @ApiOperation({ summary: 'List a product’s published reviews' })
+  @ApiParam({ name: 'productId', type: String, format: 'uuid' })
+  @ApiQuery({ name: 'sort', required: false, enum: ['helpful', 'newest', 'rating_desc', 'rating_asc'], description: 'Defaults to "helpful".' })
+  @ApiQuery({ name: 'rating', required: false, type: Number, description: 'Filter to one star rating, 1-5.' })
+  @ApiQuery({ name: 'cursor', required: false, type: String, description: 'Opaque pagination cursor from a previous page.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size, 1-100 (default 20).' })
+  @ApiResponse({ status: 200, type: ReviewListResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid query parameters or malformed productId.' })
   async list(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Query() query: unknown,
@@ -93,6 +105,15 @@ export class ReviewsController {
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   @UseGuards(ReviewSubmitThrottlerGuard)
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Submit a review for a product' })
+  @ApiParam({ name: 'productId', type: String, format: 'uuid' })
+  @ApiBody({ type: CreateReviewRequestDto })
+  @ApiResponse({ status: 202, type: ReviewResponseDto, description: 'Accepted: the review is PENDING until moderation publishes it.' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid rating/title/body or malformed productId.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
+  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'The caller has already submitted a review for this product.' })
+  @ApiResponse({ status: 429, type: ErrorResponseDto, description: 'Review-submission rate limit exceeded for this caller.' })
   async submit(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Body() body: unknown,
@@ -121,6 +142,8 @@ export class ReviewsController {
  * an unmapped Postgres error (500) instead of the 400 a malformed
  * client-supplied id actually warrants.
  */
+@ApiTags('reviews')
+@ApiBearerAuth('bearer')
 @Controller('reviews')
 export class ReviewManagementController {
   constructor(private readonly reviewsService: ReviewsService) {}
@@ -136,6 +159,14 @@ export class ReviewManagementController {
    */
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Edit the caller’s own review' })
+  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiBody({ type: UpdateReviewRequestDto })
+  @ApiResponse({ status: 200, type: ReviewResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'No fields provided, or a provided field fails validation.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'The review belongs to another author.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'No review has this id.' })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: unknown,
@@ -158,6 +189,12 @@ export class ReviewManagementController {
    */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete a review (its author, or any moderator)' })
+  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiResponse({ status: 204, description: 'Deleted.' })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
+  @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'The caller is neither the review’s author nor a moderator.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'No review has this id.' })
   async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthenticatedUser): Promise<void> {
     await this.reviewsService.remove(id, user.id, user.role);
   }
@@ -169,11 +206,16 @@ export class ReviewManagementController {
  * only takes one path prefix, and `me/reviews` doesn't nest under `reviews`
  * the way `:id` does.
  */
+@ApiTags('reviews')
+@ApiBearerAuth('bearer')
 @Controller('me/reviews')
 export class MyReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List every review the caller has authored, in every status' })
+  @ApiResponse({ status: 200, type: ReviewResponseDto, isArray: true })
+  @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
   async listMine(@CurrentUser() user: AuthenticatedUser): Promise<ReviewDto[]> {
     return this.reviewsService.listMine(user.id);
   }

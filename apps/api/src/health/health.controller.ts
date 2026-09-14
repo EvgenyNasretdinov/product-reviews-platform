@@ -1,8 +1,11 @@
 import { Controller, Get, Inject, ServiceUnavailableException } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Redis } from 'ioredis';
 import { Public } from '../auth/decorators/public.decorator.js';
+import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
 import { REDIS_CLIENT } from '../common/redis/redis.constants.js';
 import { PrismaService } from '../common/prisma/prisma.service.js';
+import { LivenessResponseDto, ReadinessResponseDto } from './dto/health.dto.js';
 
 type DependencyStatus = 'up' | 'down';
 
@@ -33,6 +36,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 // Both endpoints here are public: an orchestrator's liveness/readiness
 // probes carry no bearer token, and the failing-closed global JwtAuthGuard
 // would otherwise 401 them.
+@ApiTags('health')
 @Public()
 @Controller('health')
 export class HealthController {
@@ -47,6 +51,9 @@ export class HealthController {
    * make an orchestrator restart an otherwise healthy process.
    */
   @Get()
+  @ApiOperation({ summary: 'Liveness probe: is the process up?' })
+  @ApiResponse({ status: 200, type: LivenessResponseDto })
+  @ApiResponse({ status: 500, type: ErrorResponseDto, description: 'Unexpected server error.' })
   liveness(): { status: 'ok'; uptime: number } {
     return { status: 'ok', uptime: process.uptime() };
   }
@@ -57,6 +64,9 @@ export class HealthController {
    * exception filter) when any dependency is down.
    */
   @Get('ready')
+  @ApiOperation({ summary: 'Readiness probe: are Postgres and Redis both reachable?' })
+  @ApiResponse({ status: 200, type: ReadinessResponseDto })
+  @ApiResponse({ status: 503, type: ReadinessResponseDto, description: 'At least one dependency is down.' })
   async readiness(): Promise<ReadinessBody> {
     const [database, cache] = await Promise.all([this.checkDatabase(), this.checkCache()]);
     const body: ReadinessBody = {
