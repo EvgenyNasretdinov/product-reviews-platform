@@ -785,7 +785,10 @@ silently revert it."
 - Produces:
   - `loadEnv(source: NodeJS.ProcessEnv): AppEnv` from `src/config/env.ts`, where `AppEnv` is `{ nodeEnv, apiPort, databaseUrl, redisUrl, rabbitmqUrl, jwtSecret, jwtExpiresIn, reviewSubmitRateLimit }`. Throws an `Error` listing every invalid variable at once.
   - `PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy`.
-  - `apps/api/test/harness.ts` exporting `createTestApp(): Promise<TestApp>` where `TestApp = { app: INestApplication; prisma: PrismaService; request: supertest.Agent; close(): Promise<void> }`. **Every later integration task uses this harness** — it starts Postgres and Redis containers once per Vitest worker via a global setup, runs `prisma migrate deploy`, and truncates all tables between tests.
+  - `apps/api/test/harness.ts` exporting two entry points. **Every later integration task uses this harness** — it starts Postgres and Redis containers once per Vitest worker via a global setup and runs `prisma migrate deploy`.
+    - `setupTestApp(envOverrides?: Record<string, string>): TestContext` — **the default path every suite uses.** Called once at the top level of a test file; it registers `beforeAll` (create), `afterEach` (truncate), and `afterAll` (close) itself, so truncation between tests cannot be forgotten. Returns a context exposing `app`, `prisma`, and `request`.
+    - `createTestApp(envOverrides?): Promise<TestApp>` — the manual-control escape hatch, for the rare suite that boots a second app (for example one deliberately configured with a dead dependency). A suite using it owns its own truncation.
+    - `envOverrides` are applied to `process.env` before the Nest module compiles, and **every** overridable key is reset to its default on each call — the suites share one worker, so a key left set by an earlier file would silently change a later one's behaviour.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1114,7 +1117,7 @@ private by default, and forgetting the decorator fails closed."
 
 - [ ] **Step 1: Write the failing integration test**
 
-Cases, all against the harness with `truncate()` in `beforeEach`:
+Cases, all against `setupTestApp()` (which truncates between tests for you):
 
 1. Empty catalogue returns `{ items: [], nextCursor: null }`.
 2. With three products, the list returns all three ordered by `createdAt DESC, id DESC`.
@@ -1688,7 +1691,7 @@ text, since a moderator cannot judge an excerpt."
 
 - [ ] **Step 1: Write the failing integration test**
 
-Set `REVIEW_SUBMIT_RATE_LIMIT=2` in the harness for this suite. Cases: two submissions to two different products succeed; the third returns `429` with a numeric `Retry-After`; a different user is unaffected; `GET` endpoints are never throttled.
+Boot this suite with `setupTestApp({ REVIEW_SUBMIT_RATE_LIMIT: '2' })`. Cases: two submissions to two different products succeed; the third returns `429` with a numeric `Retry-After`; a different user is unaffected; `GET` endpoints are never throttled.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1785,4 +1788,4 @@ assertion turns that from a discovery into a build failure."
 
 **Deliberate deferrals, recorded so they are not mistaken for gaps:** the outbox relay, the moderation classifier, the rating projection, and cache invalidation on publish are all Plan 2. Until Plan 2 lands, a submitted review stays `PENDING` unless a moderator acts through the Task 14 endpoint, and `product_rating_summary` changes only via the seed. This is a working, testable system — it is simply one where publication is manual.
 
-**Type consistency check.** `CacheService` key builders are defined once in `packages/contracts/src/cache-keys.ts` (Task 9) and imported by both apps, so Plan 2's consumer deletes the keys Task 9 writes. `writeOutboxEvent(tx, event)` from `@reviews/db` has the same signature in Tasks 10, 13, and 14, and Plan 2's moderation consumer imports the same function. `EVENT_TYPES` values in Tasks 10, 13, and 14 match the `eventTypeSchema` enum from Task 3. `createTestApp()` from Task 5 gains `loginAs` in Task 7 and is used unchanged thereafter; fixtures from Task 8 are reused by Tasks 10–15.
+**Type consistency check.** `CacheService` key builders are defined once in `packages/contracts/src/cache-keys.ts` (Task 9) and imported by both apps, so Plan 2's consumer deletes the keys Task 9 writes. `writeOutboxEvent(tx, event)` from `@reviews/db` has the same signature in Tasks 10, 13, and 14, and Plan 2's moderation consumer imports the same function. `EVENT_TYPES` values in Tasks 10, 13, and 14 match the `eventTypeSchema` enum from Task 3. The Task 5 harness gains `loginAs` in Task 7 and is used unchanged thereafter, with `setupTestApp()` as the default entry point and `createTestApp()` reserved for suites needing manual control; fixtures from Task 8 are reused by Tasks 10–15.
