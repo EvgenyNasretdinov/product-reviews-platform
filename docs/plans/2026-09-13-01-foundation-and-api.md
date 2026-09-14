@@ -1225,7 +1225,15 @@ Unit tests for `MemoryCacheService`: `get` on a missing key returns `null`; `set
 
 Integration tests for the Redis implementation and the caching behaviour:
 
-1. Two consecutive `GET /products/:slug` requests hit Postgres once — assert by spying on `PrismaService.product.findUnique` (`vi.spyOn`) and expecting one call.
+1. Two consecutive `GET /products/:slug` requests hit Postgres once — assert by counting calls to `PrismaService.product.findUnique` and expecting one.
+
+   Counting those calls needs care. A bare `vi.spyOn` on a Prisma model delegate silently breaks the query: Prisma's delegates are Proxies that misreport property descriptors, so the spy replaces the method rather than wrapping it and the real query never runs. The test then passes whether or not the cache works, which is worse than no test. Capture the original method bound to its delegate first and hand it back to the spy, so it both records calls and executes the genuine query:
+
+   ```ts
+   const delegate = prisma.product;
+   const original = delegate.findUnique.bind(delegate);
+   const spy = vi.spyOn(delegate, 'findUnique').mockImplementation(original);
+   ```
 2. After `cache.del(cacheKeys.productDetail(slug))`, the next request queries again.
 3. A cached payload is byte-identical to the uncached one — fetch, flush, fetch, and `toEqual` the two bodies. This catches serialisation losses such as `Date` becoming a string only on the cache path.
 
