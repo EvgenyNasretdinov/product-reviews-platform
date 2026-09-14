@@ -4,7 +4,7 @@ import type { Redis } from 'ioredis';
 import { describe, expect, it, vi } from 'vitest';
 import { CacheService } from '../src/common/cache/cache.service.js';
 import { REDIS_CLIENT } from '../src/common/redis/redis.constants.js';
-import { createProduct } from './fixtures.js';
+import { createProduct, createReview, createUser } from './fixtures.js';
 import { createTestApp, setupTestApp, type TestContext } from './harness.js';
 
 const ctx = setupTestApp();
@@ -114,6 +114,118 @@ describe('product detail cache-aside', () => {
     const cached = await ctx.request.get(`/api/v1/products/${product.slug}`).expect(200);
 
     expect(cached.body).toEqual(uncached.body);
+  });
+});
+
+/**
+ * As {@link spyOnFindUnique}, but for `review.findMany` — the query
+ * `ReviewsRepository.listApproved` runs. See that function's doc comment
+ * for why the original implementation has to be captured and handed back
+ * in explicitly, rather than trusting `vi.spyOn`'s own "original" capture.
+ */
+function spyOnReviewFindMany(context: TestContext) {
+  const delegate = context.prisma.review;
+  const original = delegate.findMany.bind(delegate);
+  const spy = vi.spyOn(delegate, 'findMany').mockImplementation(original);
+  return {
+    spy,
+    restore: () => {
+      delegate.findMany = original;
+    },
+  };
+}
+
+/** Seeds one APPROVED review by a fresh author, for the review-list cache tests below. */
+async function seedApprovedReview(prisma: TestContext['prisma'], productId: string) {
+  const author = await createUser(prisma);
+  return createReview(prisma, { productId, authorId: author.id, status: 'APPROVED' });
+}
+
+describe('review list cache-aside', () => {
+  // Case 1, mirroring the product-detail suite above.
+  it('hits Postgres once for two consecutive first-page requests', async () => {
+    const product = await createProduct(ctx.prisma, { slug: 'review-cache-hit-once' });
+    await seedApprovedReview(ctx.prisma, product.id);
+    const { spy, restore } = spyOnReviewFindMany(ctx);
+
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    restore();
+  });
+
+  // Case 2, mirroring the product-detail suite above.
+  it('queries Postgres again after the cache entry is deleted', async () => {
+    const product = await createProduct(ctx.prisma, { slug: 'review-cache-invalidate' });
+    await seedApprovedReview(ctx.prisma, product.id);
+    const cache = ctx.app.get(CacheService);
+    const { spy, restore } = spyOnReviewFindMany(ctx);
+
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+    await cache.del(cacheKeys.reviewListFirstPage(product.id, 'helpful', undefined));
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    restore();
+  });
+
+  // Case 3, mirroring the product-detail suite's "actually finds bugs" case:
+  // a response served straight from Prisma and one served from the cache
+  // entry it wrote must be byte-identical whole bodies, not just equal on a
+  // couple of fields — this is what catches a value that only changes shape
+  // on the cache path.
+  it('returns a payload from the cache identical to a freshly computed one', async () => {
+    const product = await createProduct(ctx.prisma, { slug: 'review-cache-identical-payload' });
+    await seedApprovedReview(ctx.prisma, product.id);
+    const cache = ctx.app.get(CacheService);
+
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+    await cache.del(cacheKeys.reviewListFirstPage(product.id, 'helpful', undefined));
+
+    const uncached = await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+    const cached = await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+
+    expect(cached.body).toEqual(uncached.body);
+  });
+
+  // Design doc §7: deep pages are deliberately not cached — they're rarely
+  // requested and would multiply invalidation work. A request carrying a
+  // cursor must always reach Postgres, never the first page's cache entry.
+  it('never caches a page fetched with a cursor', async () => {
+    const product = await createProduct(ctx.prisma, { slug: 'review-cache-deep-page-uncached' });
+    await seedApprovedReview(ctx.prisma, product.id);
+    await seedApprovedReview(ctx.prisma, product.id);
+    const { spy, restore } = spyOnReviewFindMany(ctx);
+
+    const first = await ctx.request.get(`/api/v1/products/${product.id}/reviews?limit=1`).expect(200);
+    const cursor = (first.body as { nextCursor: string | null }).nextCursor;
+    expect(cursor).not.toBeNull();
+
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews?limit=1&cursor=${cursor}`).expect(200);
+    await ctx.request.get(`/api/v1/products/${product.id}/reviews?limit=1&cursor=${cursor}`).expect(200);
+
+    // The first-page request plus two identical cursor requests: three
+    // Postgres hits, none of them served from a cache entry.
+    expect(spy).toHaveBeenCalledTimes(3);
+    restore();
+  });
+
+  // A cache blip must degrade to Postgres, never 500 the listing — see
+  // ProductsService.getBySlug's doc comment and cache.integration.test.ts's
+  // matching case above for the same property on the product detail route.
+  it('serves the review list from Postgres when Redis is unreachable', async () => {
+    const broken = await createTestApp({ REDIS_URL: 'redis://127.0.0.1:1' });
+    try {
+      const product = await createProduct(broken.prisma, { slug: 'review-cache-down-fallback' });
+      await seedApprovedReview(broken.prisma, product.id);
+
+      const res = await broken.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+
+      expect((res.body as { items: unknown[] }).items).toHaveLength(1);
+    } finally {
+      await broken.close();
+    }
   });
 });
 

@@ -1,7 +1,9 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  cacheKeys,
   paginatedSchema,
   reviewDtoSchema,
+  TTL_REVIEW_LIST,
   type CreateReviewInput,
   type ReviewDto,
   type ReviewSort,
@@ -9,6 +11,7 @@ import {
 } from '@reviews/contracts';
 import type { Role } from '@reviews/db';
 import type { z } from 'zod';
+import { CacheService } from '../common/cache/cache.service.js';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toPublicReviewDto, toReviewDto } from './reviews.mapper.js';
 import {
@@ -43,7 +46,12 @@ export type ListReviewsResult = z.infer<typeof reviewListSchema>;
 
 @Injectable()
 export class ReviewsService {
-  constructor(private readonly repository: ReviewsRepository) {}
+  private readonly logger = new Logger(ReviewsService.name);
+
+  constructor(
+    private readonly repository: ReviewsRepository,
+    private readonly cache: CacheService,
+  ) {}
 
   /**
    * The public review list for a product: `APPROVED` reviews only, in the
@@ -57,11 +65,41 @@ export class ReviewsService {
    * list if `decodeCursor` didn't reject the mismatch outright — see
    * cursor.ts and this suite's "rejects a cursor from sort=newest replayed
    * against sort=helpful" case.
+   *
+   * Cache-aside covers only the first page — `query.cursor` absent — of a
+   * given `(productId, sort, rating)` combination (design doc §7: deep
+   * pages are rarely requested and would multiply invalidation work). The
+   * key, `cacheKeys.reviewListFirstPage`, lives in `@reviews/contracts` so
+   * Plan 2's aggregation worker deletes exactly what this method writes —
+   * see that module's doc comment. Follows `ProductsService.getBySlug`'s
+   * cache-aside shape exactly, including its `safeCacheGet`/`safeCacheSet`
+   * guards: a Redis failure must degrade to a database read, never fail
+   * the request.
    */
   async list(query: ListReviewsQuery): Promise<ListReviewsResult> {
     const scope = cursorScope(query.sort);
     const cursor = query.cursor ? decodeCursor(query.cursor, scope) : undefined;
 
+    if (!cursor) {
+      const key = cacheKeys.reviewListFirstPage(query.productId, query.sort, query.rating);
+      const cached = await this.safeCacheGet<ListReviewsResult>(key);
+      if (cached !== null) {
+        return cached;
+      }
+
+      const result = await this.fetchPage(query, scope, cursor);
+      await this.safeCacheSet(key, result, TTL_REVIEW_LIST);
+      return result;
+    }
+
+    return this.fetchPage(query, scope, cursor);
+  }
+
+  private async fetchPage(
+    query: ListReviewsQuery,
+    scope: string,
+    cursor: { key: string; id: string } | undefined,
+  ): Promise<ListReviewsResult> {
     const { rows, hasMore } = await this.repository.listApproved({
       productId: query.productId,
       sort: query.sort,
@@ -173,6 +211,34 @@ export class ReviewsService {
   async listMine(authorId: string): Promise<ReviewDto[]> {
     const rows = await this.repository.listByAuthor(authorId);
     return rows.map(toReviewDto);
+  }
+
+  // Identical shape to ProductsService's private cache-aside guards — see
+  // that class's doc comment on getBySlug for why both the read and the
+  // write are caught rather than left to propagate: RedisModule sets
+  // maxRetriesPerRequest: 1 so a hung Redis fails fast, but "fails fast"
+  // still means it throws, and a cache is an optional accelerator that
+  // must never turn a Redis blip into a 500 on this listing.
+  private async safeCacheGet<T>(key: string): Promise<T | null> {
+    try {
+      return await this.cache.get<T>(key);
+    } catch (error) {
+      this.logCacheFailure('read', key, error);
+      return null;
+    }
+  }
+
+  private async safeCacheSet<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
+    try {
+      await this.cache.set(key, value, ttlSeconds);
+    } catch (error) {
+      this.logCacheFailure('write', key, error);
+    }
+  }
+
+  private logCacheFailure(operation: 'read' | 'write', key: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`Cache ${operation} failed for "${key}", falling through to Postgres: ${message}`);
   }
 }
 
