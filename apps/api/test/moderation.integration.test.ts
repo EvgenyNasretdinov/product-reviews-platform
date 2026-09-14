@@ -175,6 +175,24 @@ describe('POST /api/v1/moderation/reviews/:id', () => {
     expect(events.map((e) => e.eventType)).toEqual(['review.approved']);
   });
 
+  // Without an actor on the decision event, a moderation decision is
+  // completely unattributable once the reviewer's own audit trail (there is
+  // none — see ReviewsRepository.remove's hard-delete doc comment) is gone.
+  // `@CurrentUser()` on ModerationController#decide is what makes the
+  // deciding moderator's id reach the outbox event at all.
+  it('records the deciding moderator id on the outbox event payload', async () => {
+    const modToken = await ctx.loginAs('mod@example.com');
+    const moderator = await ctx.prisma.user.findUniqueOrThrow({ where: { email: 'mod@example.com' } });
+    const { review } = await seedReview('FLAGGED');
+
+    await decide(review.id, modToken, { decision: 'APPROVED', reason: null }).expect(200);
+
+    const events = await ctx.prisma.outboxEvent.findMany({ where: { aggregateId: review.id } });
+    expect(events).toHaveLength(1);
+    const envelope = events[0]?.payload as { payload: { moderatorId: string } };
+    expect(envelope.payload.moderatorId).toBe(moderator.id);
+  });
+
   // Case 6.
   it('rejecting without a reason returns 400', async () => {
     const modToken = await ctx.loginAs('mod@example.com');

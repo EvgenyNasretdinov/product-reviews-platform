@@ -14,6 +14,7 @@ import {
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { moderationDecisionInputSchema, reviewStatusSchema, type ReviewDto } from '@reviews/contracts';
 import { z } from 'zod';
+import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
 import { Roles } from '../auth/decorators/roles.decorator.js';
 import { RolesGuard } from '../auth/guards/roles.guard.js';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
@@ -86,6 +87,14 @@ export class ModerationController {
    *
    * `200`, not `201`/`202`/`204`: this always updates an existing review
    * and returns its new state in the body.
+   *
+   * `@CurrentUser()` supplies the deciding moderator's id, threaded through
+   * to `ModerationService.decide` and on into the outbox event's payload —
+   * see `reviewModeratedPayloadSchema`'s `moderatorId` field. Without it, a
+   * moderation decision would be completely unattributable: there's no
+   * column on `reviews` recording who decided it, and the row itself can be
+   * hard-deleted later (`ReviewsRepository.remove`), so the event is the
+   * only durable record.
    */
   @Post(':id')
   @HttpCode(HttpStatus.OK)
@@ -98,12 +107,16 @@ export class ModerationController {
   @ApiResponse({ status: 403, type: ErrorResponseDto, description: 'The caller is not a MODERATOR.' })
   @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'No review has this id.' })
   @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'The review is not awaiting moderation.' })
-  async decide(@Param('id', ParseUUIDPipe) id: string, @Body() body: unknown): Promise<ReviewDto> {
+  async decide(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<ReviewDto> {
     const parsed = moderationDecisionInputSchema.safeParse(body);
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join('; '));
     }
 
-    return this.moderationService.decide(id, parsed.data);
+    return this.moderationService.decide(id, parsed.data, user.id);
   }
 }

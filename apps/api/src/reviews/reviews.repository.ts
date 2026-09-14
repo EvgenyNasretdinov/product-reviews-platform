@@ -220,6 +220,8 @@ export interface DecideModerationParams {
   reviewId: string;
   decision: 'APPROVED' | 'REJECTED';
   reason: string | null;
+  /** The moderator recording this decision — carried into the outbox event's payload. */
+  moderatorId: string;
 }
 
 /**
@@ -634,7 +636,7 @@ export class ReviewsRepository {
    * decided).
    */
   async decide(params: DecideModerationParams): Promise<ReviewWithAuthor> {
-    const { reviewId, decision, reason } = params;
+    const { reviewId, decision, reason, moderatorId } = params;
 
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.review.updateMany({
@@ -672,7 +674,7 @@ export class ReviewsRepository {
       await writeOutboxEvent(tx, {
         eventType: decision === 'APPROVED' ? EVENT_TYPES.REVIEW_APPROVED : EVENT_TYPES.REVIEW_REJECTED,
         aggregateId: reviewId,
-        payload: { reviewId, productId: review.productId, status: decision, moderationReason: reason },
+        payload: { reviewId, productId: review.productId, status: decision, moderationReason: reason, moderatorId },
       });
 
       return review;

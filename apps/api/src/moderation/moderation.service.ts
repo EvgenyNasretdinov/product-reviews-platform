@@ -65,14 +65,25 @@ export class ModerationService {
    * itself (see `ReviewsRepository.decide`'s doc comment); this method just
    * maps each to the response its own name promises, rather than folding
    * both into the same 409 the way a bare `updateMany.count === 0` would.
+   *
+   * `moderatorId` is the caller's own id (see `ModerationController#decide`,
+   * which supplies it from `@CurrentUser()`) — carried through to
+   * `ReviewsRepository.decide` unchanged so the decision's outbox event
+   * records who made it. With hard-delete-and-cascade on `reviews`, that
+   * event is the only place this fact survives.
    */
-  async decide(reviewId: string, input: ModerationDecisionInput): Promise<ReviewDto> {
+  async decide(reviewId: string, input: ModerationDecisionInput, moderatorId: string): Promise<ReviewDto> {
     if (input.decision === 'REJECTED' && !input.reason) {
       throw new BadRequestException('a reason is required to reject a review');
     }
 
     try {
-      const review = await this.repository.decide({ reviewId, decision: input.decision, reason: input.reason });
+      const review = await this.repository.decide({
+        reviewId,
+        decision: input.decision,
+        reason: input.reason,
+        moderatorId,
+      });
       return toReviewDto(review);
     } catch (error) {
       if (error instanceof ReviewNotFoundError) {

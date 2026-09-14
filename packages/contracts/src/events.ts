@@ -62,6 +62,15 @@ export const reviewModeratedPayloadSchema = z
     productId: z.string().uuid(),
     status: z.enum(['APPROVED', 'REJECTED', 'FLAGGED']),
     moderationReason: z.string().nullable(),
+    // The user who made the decision. With hard-delete-and-cascade on
+    // `reviews` (see ReviewsRepository.remove's doc comment), this event —
+    // not a column on the row, which may not outlive the decision — is the
+    // only durable record of who moderated what. Required, not nullable:
+    // `POST /moderation/reviews/:id` is MODERATOR-only, so a manual
+    // decision always has a real actor. An automatic classifier's FLAGGED
+    // event (a later plan) has no human actor yet; that gap is for
+    // whichever plan wires that path up to resolve, not solved here.
+    moderatorId: z.string().uuid(),
   })
   .strict();
 export type ReviewModeratedPayload = z.infer<typeof reviewModeratedPayloadSchema>;
