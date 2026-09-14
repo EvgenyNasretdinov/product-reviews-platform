@@ -11,11 +11,14 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { createReviewInputSchema, reviewSortSchema, updateReviewInputSchema, type ReviewDto } from '@reviews/contracts';
+import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
 import { Public } from '../auth/decorators/public.decorator.js';
+import { ReviewSubmitThrottlerGuard } from '../common/throttle/throttle.module.js';
 import { ReviewsService, type ListReviewsResult } from './reviews.service.js';
 
 /**
@@ -77,9 +80,19 @@ export class ReviewsController {
    * starts life `PENDING`, unpublished until a later moderation step
    * approves it, and `201` would claim a visibility this response hasn't
    * delivered.
+   *
+   * Rate-limited via `ReviewSubmitThrottlerGuard`, applied to this one
+   * handler and nowhere else on this controller — `list` above stays
+   * completely unthrottled, since a browsing visitor triggering a 429
+   * would be absurd. Review spam is cheap to generate and expensive for a
+   * human moderator to triage, which is why the cap sits on this write
+   * path specifically. See throttle.module.ts for why the counter lives
+   * in Redis and how it's keyed.
    */
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
+  @UseGuards(ReviewSubmitThrottlerGuard)
+  @Throttle({ default: {} })
   async submit(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Body() body: unknown,

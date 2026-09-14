@@ -4,6 +4,7 @@ import { ConfigModule } from './config/config.module.js';
 import { CacheModule } from './common/cache/cache.module.js';
 import { PrismaModule } from './common/prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
+import { ThrottleModule } from './common/throttle/throttle.module.js';
 import { HealthModule } from './health/health.module.js';
 import { ModerationModule } from './moderation/moderation.module.js';
 import { ProductsModule } from './products/products.module.js';
@@ -15,6 +16,7 @@ import { ReviewsModule } from './reviews/reviews.module.js';
     PrismaModule,
     RedisModule,
     CacheModule,
+    ThrottleModule,
     AuthModule,
     HealthModule,
     ProductsModule,
