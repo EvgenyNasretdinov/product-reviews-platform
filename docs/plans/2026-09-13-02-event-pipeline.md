@@ -280,9 +280,23 @@ asserts twenty distinct messages.
 
 Rows are published before they are marked published. The opposite order
 loses an event whenever the process dies between the two steps, whereas
-this order can only duplicate one, and every consumer is built to
-absorb duplicates. The test suite states that guarantee explicitly
+this order can only duplicate, never lose — and every consumer is built
+to absorb duplicates. The test suite states that guarantee explicitly
 rather than leaving it as folklore.
+
+Be precise about how much it can duplicate. The batch shares one
+transaction, because the row lock is what stops a second relay claiming
+the same rows, so a database failure part-way through aborts the whole
+batch — including rows the broker has already accepted. Those are
+republished on the next pass. The blast radius is therefore one batch,
+bounded by `OUTBOX_BATCH_SIZE`, not one event. That is still
+at-least-once and still absorbed by idempotent consumers, but a comment
+claiming "one event" would be wrong.
+
+Because the transaction stays open across real broker round-trips, set
+an explicit `timeout` on it rather than inheriting Prisma's silent 5s
+default, and size the batch to fit that budget. The ceiling on batch
+size here is the transaction timeout, not throughput.
 
 A row that fails to publish records the error and its attempt count in
 its own transaction, so one poisonous row does not roll back the
