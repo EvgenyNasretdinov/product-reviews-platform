@@ -91,6 +91,17 @@ model Review {
   @@unique([productId, authorId])
   @@index([productId, status, createdAt(sort: Desc)])
   @@index([productId, status, helpfulCount(sort: Desc)])
+  // Serves ModerationRepository.moderate's "author's previous bodies" query
+  // (apps/worker/src/moderation/moderation.repository.ts): a bare
+  // `authorId` equality filter, ordered by `createdAt` descending, bounded
+  // by `take: 20`. Without this, that filter has no author-led index to
+  // seek on -- the two indexes above are both product-led -- so Postgres
+  // falls back to a sequential scan on every `review.submitted` delivery,
+  // not just for prolific authors, and the cost grows with table size
+  // rather than with how many reviews the author actually wrote. Added in
+  // a follow-up migration (see prisma/migrations) rather than folded into
+  // the init migration, since that one is already merged to main.
+  @@index([authorId, createdAt(sort: Desc)])
   @@map("reviews")
 }
 

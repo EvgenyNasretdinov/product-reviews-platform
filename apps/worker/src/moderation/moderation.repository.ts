@@ -56,9 +56,18 @@ export class ModerationRepository {
       const review = await tx.review.findUnique({ where: { id: reviewId } });
       if (!review || review.status !== 'PENDING') return;
 
+      // `orderBy: createdAt desc` is what makes `take: 20` mean the
+      // author's twenty *most recent* other reviews rather than whichever
+      // twenty Postgres happens to return: for a prolific author, an
+      // unordered take could miss their newest bodies entirely, which are
+      // exactly what duplicate detection cares about. Served by the
+      // `reviews_author_id_created_at_idx` index (see schema.prisma) —
+      // without it this scans instead of seeking, on every
+      // review.submitted delivery, not only for prolific authors.
       const previous = await tx.review.findMany({
         where: { authorId: review.authorId, id: { not: review.id } },
         select: { body: true },
+        orderBy: { createdAt: 'desc' },
         take: PREVIOUS_BODIES_LIMIT,
       });
 
