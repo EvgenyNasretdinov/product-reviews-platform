@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../config/env.js';
 import { AmqpConnection, computeReconnectDelayMs, type AmqpOpener } from './amqp.connection.js';
 
-const fakeEnv: AppEnv = { nodeEnv: 'test', rabbitmqUrl: 'amqp://fake-host-never-dialed' };
+const fakeEnv: AppEnv = {
+  nodeEnv: 'test',
+  databaseUrl: 'postgresql://fake-host-never-dialed/db',
+  rabbitmqUrl: 'amqp://fake-host-never-dialed',
+  outboxBatchSize: 50,
+  outboxMaxAttempts: 5,
+  outboxPollIntervalMs: 500,
+};
 
 function makeFakeChannel(): ConfirmChannel {
   return {

@@ -10,6 +10,12 @@ export interface WorkerHarness {
   publish(envelope: EventEnvelope): Promise<void>;
   /** Resolves with the next message delivered to `queue`, acking it, or rejects after `timeoutMs`. */
   consumeOne(queue: string, timeoutMs: number): Promise<ConsumeMessage>;
+  /**
+   * Resolves with the next `count` messages delivered to `queue`, in
+   * delivery order, acking each. Rejects if `count` messages have not
+   * all arrived within `timeoutMs` of the call starting.
+   */
+  consumeMany(queue: string, count: number, timeoutMs?: number): Promise<ConsumeMessage[]>;
   /** Empties every declared queue and dead-letter queue. Call between tests. */
   purgeAll(): Promise<void>;
   close(): Promise<void>;
@@ -39,6 +45,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
     channel,
     publish: (envelope) => publisher.publish(envelope),
     consumeOne: (queue, timeoutMs) => consumeOne(channel, queue, timeoutMs),
+    consumeMany: (queue, count, timeoutMs = 5_000) => consumeMany(channel, queue, count, timeoutMs),
     async purgeAll() {
       for (const queue of ALL_QUEUES) await channel.purgeQueue(queue);
     },
@@ -77,6 +84,53 @@ function consumeOne(channel: ConfirmChannel, queue: string, timeoutMs: number): 
         consumerTag = ok.consumerTag;
         // The timeout can fire before this promise resolves (a very short
         // timeoutMs); cancel immediately once we finally have a tag.
+        if (settled) channel.cancel(consumerTag).catch(() => undefined);
+      })
+      .catch((error: unknown) => {
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      });
+  });
+}
+
+/**
+ * Like {@link consumeOne} but collects `count` messages, in delivery
+ * order, before resolving. `timeoutMs` bounds the whole collection, not
+ * each individual message, so a queue that delivers 19 of 20 expected
+ * messages still times out instead of hanging forever on the last one.
+ */
+function consumeMany(channel: ConfirmChannel, queue: string, count: number, timeoutMs: number): Promise<ConsumeMessage[]> {
+  return new Promise<ConsumeMessage[]>((resolve, reject) => {
+    const received: ConsumeMessage[] = [];
+    let settled = false;
+    let consumerTag: string | undefined;
+
+    const finish = (run: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (consumerTag) channel.cancel(consumerTag).catch(() => undefined);
+      run();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `consumeMany timeout: received ${received.length}/${count} messages on queue "${queue}" within ${timeoutMs}ms`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+
+    channel
+      .consume(queue, (msg) => {
+        if (!msg || settled) return;
+        channel.ack(msg);
+        received.push(msg);
+        if (received.length >= count) finish(() => resolve(received));
+      })
+      .then((ok) => {
+        consumerTag = ok.consumerTag;
         if (settled) channel.cancel(consumerTag).catch(() => undefined);
       })
       .catch((error: unknown) => {

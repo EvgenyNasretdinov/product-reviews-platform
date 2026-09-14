@@ -23,6 +23,10 @@ describe('worker boot', () => {
 
   beforeAll(() => {
     process.env.RABBITMQ_URL = inject('rabbitmqUrl');
+    // Task 2 (the outbox relay) makes DATABASE_URL a required part of the
+    // worker's env; AppModule's ConfigModule validates it on every boot
+    // regardless of whether RelayModule is wired into the graph yet.
+    process.env.DATABASE_URL = inject('databaseUrl');
   });
 
   afterAll(async () => {
