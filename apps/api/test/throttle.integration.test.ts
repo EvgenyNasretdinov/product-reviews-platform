@@ -1,6 +1,8 @@
+import type { Redis } from 'ioredis';
 import { describe, expect, it } from 'vitest';
+import { REDIS_CLIENT } from '../src/common/redis/redis.constants.js';
 import { createProduct } from './fixtures.js';
-import { setupTestApp } from './harness.js';
+import { createTestApp, setupTestApp } from './harness.js';
 
 /**
  * Booted with a tight limit (2/hour) instead of the canonical default (5)
@@ -19,6 +21,18 @@ const VALID_PAYLOAD = {
 
 function submit(productId: string, token: string) {
   return ctx.request.post(`/api/v1/products/${productId}/reviews`).auth(token, { type: 'bearer' }).send(VALID_PAYLOAD);
+}
+
+/**
+ * The throttler storage keys observed in practice (see throttle.module.ts)
+ * are `{hash:name}:hits` / `{hash:name}:blocked`. Filtering `redis.keys('*')`
+ * down to this suffix, rather than asserting on `dbsize()`, keeps the
+ * assertion pinned to throttler state specifically even if some other
+ * cache entry happens to exist in the same Redis database.
+ */
+async function throttlerKeys(redis: Redis): Promise<string[]> {
+  const all = await redis.keys('*');
+  return all.filter((key) => key.endsWith(':hits') || key.endsWith(':blocked'));
 }
 
 describe('review submission rate limiting', () => {
@@ -43,23 +57,6 @@ describe('review submission rate limiting', () => {
     expect(blocked.headers['retry-after']).toBeDefined();
     expect(Number.isFinite(retryAfter)).toBe(true);
     expect(retryAfter).toBeGreaterThan(0);
-  });
-
-  // Deliberately depends on the previous test having exhausted (and
-  // blocked) alice's quota, and on setupTestApp's afterEach truncate()
-  // flushing Redis between tests (see harness.ts: it does this via
-  // `cache.delByPrefix('')`, a whole-keyspace SCAN+DEL over the same
-  // shared ioredis client the throttler storage is built on). If the
-  // throttler's own keys weren't covered by that flush, this request
-  // would still see alice as blocked and come back 429 instead of 202 —
-  // which is exactly the "passes in isolation, fails after another suite"
-  // failure mode this is checking for, just made to happen one test over
-  // instead of one suite over.
-  it('does not leak a blocked user\'s counter into the next test', async () => {
-    const token = await ctx.loginAs('alice@example.com');
-    const product = await createProduct(ctx.prisma);
-
-    await submit(product.id, token).expect(202);
   });
 
   // Case: a different user is unaffected by the first user's exhaustion —
@@ -94,5 +91,67 @@ describe('review submission rate limiting', () => {
     await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
     await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
     await ctx.request.get(`/api/v1/products/${product.id}/reviews`).expect(200);
+  });
+
+  // Redis is unreachable for the whole app in this one test (a fresh app
+  // via createTestApp, not the shared ctx — see cache.integration.test.ts's
+  // "cache resilience" describe block for the same pattern and why port 1
+  // fails fast with ECONNREFUSED instead of hanging). This exercises the
+  // fail-open ruling in throttle.module.ts's FailOpenThrottlerStorage doc
+  // comment: a broken rate limiter must not take the whole write endpoint
+  // down with it.
+  it('still accepts a submission when Redis is unreachable', async () => {
+    const broken = await createTestApp({ REDIS_URL: 'redis://127.0.0.1:1' });
+    try {
+      const token = await broken.loginAs('alice@example.com');
+      const product = await createProduct(broken.prisma);
+
+      await broken.request.post(`/api/v1/products/${product.id}/reviews`).auth(token, { type: 'bearer' }).send(VALID_PAYLOAD).expect(202);
+    } finally {
+      await broken.close();
+    }
+  });
+
+  // Grouped and pinned with `.sequential` deliberately: this pair only
+  // proves anything about the Redis flush if the second test runs right
+  // after the first, sharing the `afterEach` between them (see
+  // setupTestApp in harness.ts). `.sequential` keeps that true even if
+  // this file is later split or the suite's run mode changes to allow
+  // concurrent tests within a file — plain declaration order alone
+  // wouldn't survive either of those.
+  //
+  // An earlier version of this pair keyed the check off
+  // `loginAs('alice@example.com')`'s user id surviving into the next
+  // test — but `truncate()` deletes the `users` table between tests
+  // (see harness.ts), and `users.id` defaults to `uuid(7)` (see
+  // packages/db/prisma/schema.prisma), so the *next* loginAs('alice@...')
+  // call creates a brand-new row with a brand-new id. The throttler keys
+  // on that id, so the following request always landed on a
+  // never-before-seen Redis key and returned 202 whether or not the flush
+  // actually ran — the test could not fail for the reason its name
+  // claimed. Reading Redis directly, instead of inferring flush behaviour
+  // from an HTTP status code tied to an identity that doesn't survive
+  // truncation, closes that gap.
+  describe.sequential('redis flush covers throttler keys between tests', () => {
+    it('leaves throttler keys in redis after a user is blocked', async () => {
+      const token = await ctx.loginAs('alice@example.com');
+      const [first, second, third] = await Promise.all([
+        createProduct(ctx.prisma),
+        createProduct(ctx.prisma),
+        createProduct(ctx.prisma),
+      ]);
+
+      await submit(first.id, token).expect(202);
+      await submit(second.id, token).expect(202);
+      await submit(third.id, token).expect(429);
+
+      const redis = ctx.app.get<Redis>(REDIS_CLIENT);
+      expect((await throttlerKeys(redis)).length).toBeGreaterThan(0);
+    });
+
+    it('has no throttler keys left after the harness truncates between tests', async () => {
+      const redis = ctx.app.get<Redis>(REDIS_CLIENT);
+      expect(await throttlerKeys(redis)).toEqual([]);
+    });
   });
 });

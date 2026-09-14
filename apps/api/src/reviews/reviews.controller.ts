@@ -14,7 +14,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { createReviewInputSchema, reviewSortSchema, updateReviewInputSchema, type ReviewDto } from '@reviews/contracts';
-import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
 import { Public } from '../auth/decorators/public.decorator.js';
@@ -87,12 +86,13 @@ export class ReviewsController {
    * would be absurd. Review spam is cheap to generate and expensive for a
    * human moderator to triage, which is why the cap sits on this write
    * path specifically. See throttle.module.ts for why the counter lives
-   * in Redis and how it's keyed.
+   * in Redis and how it's keyed. The actual limit isn't set here — it
+   * comes from `AppEnv#reviewSubmitRateLimit` inside `ThrottleModule`'s
+   * `ThrottlerModule.forRootAsync` factory, the only place it's defined.
    */
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   @UseGuards(ReviewSubmitThrottlerGuard)
-  @Throttle({ default: {} })
   async submit(
     @Param('productId', ParseUUIDPipe) productId: string,
     @Body() body: unknown,
