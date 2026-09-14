@@ -202,6 +202,17 @@ export class ReviewManagementController {
 }
 
 /**
+ * `cursor` and `limit` are validated by hand through this schema — the
+ * same reason `listReviewsQuerySchema` above is. No `sort`/`rating`: this
+ * listing has exactly one order (newest first, see
+ * `ReviewsRepository.listByAuthor`) and no filter.
+ */
+const listMineQuerySchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+/**
  * `GET /me/reviews` — the caller's own reviews, in every status. Deliberately
  * a separate controller from `ReviewManagementController`: `@Controller`
  * only takes one path prefix, and `me/reviews` doesn't nest under `reviews`
@@ -213,11 +224,27 @@ export class ReviewManagementController {
 export class MyReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
 
+  /**
+   * Cursor-paginated like every other listing in this API — previously
+   * returned every review the caller had ever written as a bare array,
+   * with no `take` and no cursor, so a prolific author got everything in
+   * one unbounded response. `ReviewListResponseDto` (the same
+   * `{ items, nextCursor }` envelope the public list uses) replaces the
+   * old `ReviewDto[]` response shape.
+   */
   @Get()
   @ApiOperation({ summary: 'List every review the caller has authored, in every status' })
-  @ApiResponse({ status: 200, type: ReviewResponseDto, isArray: true })
+  @ApiQuery({ name: 'cursor', required: false, type: String, description: 'Opaque pagination cursor from a previous page.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size, 1-100 (default 20).' })
+  @ApiResponse({ status: 200, type: ReviewListResponseDto })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid query parameters.' })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
-  async listMine(@CurrentUser() user: AuthenticatedUser): Promise<ReviewDto[]> {
-    return this.reviewsService.listMine(user.id);
+  async listMine(@Query() query: unknown, @CurrentUser() user: AuthenticatedUser): Promise<ListReviewsResult> {
+    const parsed = listMineQuerySchema.safeParse(query);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+
+    return this.reviewsService.listMine({ authorId: user.id, ...parsed.data });
   }
 }

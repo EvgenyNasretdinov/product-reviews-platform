@@ -216,6 +216,18 @@ export interface ModerationQueuePage {
   hasMore: boolean;
 }
 
+export interface ListByAuthorParams {
+  authorId: string;
+  limit: number;
+  cursor?: { key: string; id: string };
+}
+
+export interface ListByAuthorPage {
+  /** At most `limit` rows — see {@link ListApprovedReviewsPage} for why. */
+  rows: ReviewWithAuthor[];
+  hasMore: boolean;
+}
+
 export interface DecideModerationParams {
   reviewId: string;
   decision: 'APPROVED' | 'REJECTED';
@@ -548,20 +560,45 @@ export class ReviewsRepository {
   }
 
   /**
-   * Every review `authorId` has written, in every status, newest first —
-   * the backing query for `GET /me/reviews`. No `productId` filter and no
-   * `status: 'APPROVED'` filter: unlike {@link listApproved}, this is the
-   * author reading their own work, so a `PENDING`/`REJECTED`/`FLAGGED` row
-   * (and, on a rejected one, its `moderationReason`) is exactly what should
-   * come back — see reviews.mapper.ts's `toReviewDto` vs `toPublicReviewDto`
-   * for the two paths this deliberately keeps apart.
+   * Keyset pagination over every review `params.authorId` has written, in
+   * every status, newest first — the backing query for `GET /me/reviews`.
+   * No `productId` filter and no `status: 'APPROVED'` filter: unlike
+   * {@link listApproved}, this is the author reading their own work, so a
+   * `PENDING`/`REJECTED`/`FLAGGED` row (and, on a rejected one, its
+   * `moderationReason`) is exactly what should come back — see
+   * reviews.mapper.ts's `toReviewDto` vs `toPublicReviewDto` for the two
+   * paths this deliberately keeps apart.
+   *
+   * Reuses `SORTS.newest`'s `orderBy` and `cursorWhere('newest', …)`'s
+   * `WHERE` fragment, the same way {@link listQueue} does — this listing
+   * has exactly one sort order (newest first), so there is no reason for
+   * it to duplicate the keyset-pagination machinery {@link listApproved}
+   * already built to support four. Fetches `limit + 1` rows so the caller
+   * can tell whether a next page exists without a second `COUNT` query —
+   * see {@link ListApprovedReviewsPage} for why.
+   *
+   * Previously returned every row unbounded, with no `take` and no cursor:
+   * a prolific author's full history came back in one response, with no
+   * way to page through it. This brings it in line with every other
+   * listing in this codebase.
    */
-  async listByAuthor(authorId: string): Promise<ReviewWithAuthor[]> {
-    return this.prisma.review.findMany({
-      where: { authorId },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  async listByAuthor(params: ListByAuthorParams): Promise<ListByAuthorPage> {
+    const { authorId, limit, cursor } = params;
+
+    const conditions: Prisma.ReviewWhereInput[] = [{ authorId }];
+    if (cursor) {
+      conditions.push(cursorWhere('newest', cursor.key, cursor.id));
+    }
+
+    const rows = await this.prisma.review.findMany({
+      where: { AND: conditions },
+      orderBy: SORTS.newest.orderBy,
+      take: limit + 1,
       include: { author: { select: { id: true, displayName: true } } },
     });
+
+    const hasMore = rows.length > limit;
+    return { rows: hasMore ? rows.slice(0, limit) : rows, hasMore };
   }
 
   /**

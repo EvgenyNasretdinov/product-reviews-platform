@@ -4,6 +4,13 @@ import { describe, expect, it } from 'vitest';
 import { createProduct, createReview, createUser, type CreateReviewOverrides } from './fixtures.js';
 import { setupTestApp } from './harness.js';
 
+// supertest's Response#body is typed `any`; narrow it through this shape
+// once instead of sprinkling eslint-disable comments at each access.
+interface MyReviewsBody {
+  items: ReviewDto[];
+  nextCursor: string | null;
+}
+
 const ctx = setupTestApp();
 
 interface SeededReview {
@@ -180,7 +187,7 @@ describe('GET /api/v1/me/reviews', () => {
     const { review: approved } = await seedApprovedReviewBy('author8@example.com');
 
     const res = await getMine(token).expect(200);
-    const items = res.body as ReviewDto[];
+    const items = (res.body as MyReviewsBody).items;
 
     const byId = new Map(items.map((r) => [r.id, r]));
     expect(byId.has(pending.id)).toBe(true);
@@ -199,10 +206,43 @@ describe('GET /api/v1/me/reviews', () => {
     const { review: theirs } = await seedReviewBy('author9b@example.com', { status: 'PENDING' as ReviewStatus });
 
     const res = await getMine(token).expect(200);
-    const items = res.body as ReviewDto[];
+    const items = (res.body as MyReviewsBody).items;
     const ids = items.map((r) => r.id);
 
     expect(ids).toContain(mine.id);
     expect(ids).not.toContain(theirs.id);
+  });
+
+  // Regression: previously returned every review the caller had ever
+  // written as a bare, unbounded array, with no `take` and no cursor.
+  it('paginates with a cursor, covering every review exactly once across pages', async () => {
+    const token = await ctx.loginAs('author10@example.com');
+    const reviews: Review[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const { review } = await seedReviewBy('author10@example.com', { status: 'PENDING' as ReviewStatus });
+      reviews.push(review);
+    }
+
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const url = `/api/v1/me/reviews?limit=2${cursor ? `&cursor=${cursor}` : ''}`;
+      const res: { body: MyReviewsBody } = await ctx.request
+        .get(url)
+        .auth(token, { type: 'bearer' })
+        .expect(200);
+      collected.push(...res.body.items.map((r) => r.id));
+      cursor = res.body.nextCursor;
+    } while (cursor);
+
+    expect(collected.sort()).toEqual(reviews.map((r) => r.id).sort());
+    expect(new Set(collected).size).toBe(reviews.length);
+  });
+
+  it('rejects limit=0 and limit=101 with 400', async () => {
+    const token = await ctx.loginAs('author11@example.com');
+
+    await ctx.request.get('/api/v1/me/reviews?limit=0').auth(token, { type: 'bearer' }).expect(400);
+    await ctx.request.get('/api/v1/me/reviews?limit=101').auth(token, { type: 'bearer' }).expect(400);
   });
 });

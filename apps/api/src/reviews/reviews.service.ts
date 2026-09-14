@@ -37,6 +37,15 @@ export interface ListReviewsQuery {
   limit: number;
 }
 
+export interface ListMineQuery {
+  authorId: string;
+  cursor?: string;
+  limit: number;
+}
+
+/** The cursor scope for `GET /me/reviews` — see cursor.ts for why a cursor is scoped at all. */
+const ME_REVIEWS_CURSOR_SCOPE = 'me-reviews';
+
 // Derived from the shared contract rather than hand-restated — see
 // products.service.ts's `productListSchema` for why: if `paginatedSchema`'s
 // field names ever change, this type (and every call site that builds one)
@@ -201,16 +210,35 @@ export class ReviewsService {
   }
 
   /**
-   * Every review `authorId` has authored, in every status, including
+   * Every review `query.authorId` has authored, in every status, including
    * `moderationReason` on rejected ones — the backing call for
    * `GET /me/reviews`. Uses `toReviewDto`, never `toPublicReviewDto`: this
    * is the one path where a caller is entitled to see their own
    * `moderationReason`, unlike the public `list` above, which always nulls
    * it. See reviews.mapper.ts for that contrast.
+   *
+   * Cursor-paginated like every other listing in this codebase, scoped
+   * `'me-reviews'` so a cursor minted here can never be replayed against
+   * `list` or the moderation queue's cursor — see cursor.ts. Previously
+   * returned every row the author had ever written in one unbounded array;
+   * a prolific author got everything in a single response with no way to
+   * page through it.
    */
-  async listMine(authorId: string): Promise<ReviewDto[]> {
-    const rows = await this.repository.listByAuthor(authorId);
-    return rows.map(toReviewDto);
+  async listMine(query: ListMineQuery): Promise<ListReviewsResult> {
+    const cursor = query.cursor ? decodeCursor(query.cursor, ME_REVIEWS_CURSOR_SCOPE) : undefined;
+
+    const { rows, hasMore } = await this.repository.listByAuthor({
+      authorId: query.authorId,
+      limit: query.limit,
+      cursor,
+    });
+
+    const items = rows.map(toReviewDto);
+    const last = rows.at(-1);
+    const nextCursor =
+      hasMore && last ? encodeCursor(cursorKeyFor('newest', last), last.id, ME_REVIEWS_CURSOR_SCOPE) : null;
+
+    return { items, nextCursor };
   }
 
   // Identical shape to ProductsService's private cache-aside guards — see
