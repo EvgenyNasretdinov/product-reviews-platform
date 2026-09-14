@@ -1,0 +1,24 @@
+/**
+ * The one error type every page and route handler in this app should ever
+ * see for a failed call through `apiFetch`, whether the failure was the
+ * API responding with a non-2xx status, the network call itself failing,
+ * or a 2xx body that does not match the schema the caller expected.
+ *
+ * Collapsing all three into one shape is what lets a page have a single
+ * error-handling path instead of three: a `ZodError` (from a schema
+ * mismatch) or a raw `TypeError` (from a failed `fetch`) escaping into a
+ * React Server Component renders as an opaque framework 500 rather than
+ * a handled error state, so neither is allowed to propagate past
+ * `apiFetch` — see lib/api-client.ts.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(status: number, message: string, code?: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}

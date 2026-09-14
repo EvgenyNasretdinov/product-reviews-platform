@@ -1,0 +1,33 @@
+{
+  "extends": "@reviews/tooling/tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["dom", "dom.iterable", "ES2023"],
+    "module": "ESNext",
+    // Next.js bundles everything itself (webpack/Turbopack); tsc here is
+    // only ever run with --noEmit for the typecheck script and the editor.
+    // "Bundler" resolution is what Next's own generated tsconfig uses and
+    // is what lets imports omit file extensions, unlike the NodeNext
+    // resolution apps/api and apps/worker need because Node runs their
+    // compiled output directly.
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "allowJs": true,
+    "noEmit": true,
+    "incremental": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    // The base tsconfig turns these on for NestJS's reflection-based DI.
+    // Next.js has no decorators anywhere in this app; leaving them on is
+    // harmless for compilation but signals a dependency this app doesn't
+    // have, so they're switched off explicitly.
+    "experimentalDecorators": false,
+    "emitDecoratorMetadata": false,
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", ".next", "dist"]
+}
