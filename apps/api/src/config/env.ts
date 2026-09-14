@@ -10,6 +10,9 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().min(1),
   // Reviews per author per hour; see docs/design for the exact window.
   REVIEW_SUBMIT_RATE_LIMIT: z.coerce.number().int().positive().default(5),
+  // Origin the browser-facing web app runs on; only ever used to permit
+  // it in CORS, never to construct a URL the API calls itself.
+  WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
 });
 
 export interface AppEnv {
@@ -21,6 +24,7 @@ export interface AppEnv {
   jwtSecret: string;
   jwtExpiresIn: string;
   reviewSubmitRateLimit: number;
+  webOrigin: string;
 }
 
 /**
@@ -47,5 +51,6 @@ export function loadEnv(source: NodeJS.ProcessEnv): AppEnv {
     jwtSecret: env.JWT_SECRET,
     jwtExpiresIn: env.JWT_EXPIRES_IN,
     reviewSubmitRateLimit: env.REVIEW_SUBMIT_RATE_LIMIT,
+    webOrigin: env.WEB_ORIGIN,
   };
 }

@@ -1,13 +1,8 @@
 import type { INestApplication } from '@nestjs/common';
 import { ValidationPipe } from '@nestjs/common';
 import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter.js';
-
-// The web app runs against Next.js's own default dev port. There is no
-// dedicated env var for this: AppEnv's shape is fixed by the config
-// contract (nodeEnv, apiPort, databaseUrl, redisUrl, rabbitmqUrl, jwtSecret,
-// jwtExpiresIn, reviewSubmitRateLimit), and the API only ever needs to
-// *permit* the browser's origin, never to read its own.
-const WEB_ORIGIN = 'http://localhost:3000';
+import { APP_ENV } from './config/config.module.js';
+import type { AppEnv } from './config/env.js';
 
 /**
  * Configures the pipes, filters, prefix, and CORS policy shared by the
@@ -19,8 +14,10 @@ const WEB_ORIGIN = 'http://localhost:3000';
  * actually ships.
  */
 export function configureApp(app: INestApplication): void {
+  const env = app.get<AppEnv>(APP_ENV);
+
   app.setGlobalPrefix('api/v1');
-  app.enableCors({ origin: WEB_ORIGIN, credentials: true });
+  app.enableCors({ origin: env.webOrigin, credentials: true });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

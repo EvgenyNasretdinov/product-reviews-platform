@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import supertest from 'supertest';
-import { inject } from 'vitest';
+import { afterAll, afterEach, beforeAll, inject } from 'vitest';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/bootstrap.js';
 import { PrismaService } from '../src/common/prisma/prisma.service.js';
@@ -17,28 +17,49 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
-// Values every suite needs but none of them actually exercises. Kept
-// deliberately inert (no queue in this task touches RABBITMQ_URL yet) so
-// loadEnv's schema is satisfied without pulling in a fourth container.
+/** What a suite actually reads once it's set up — see {@link setupTestApp}. */
+export interface TestContext {
+  readonly app: INestApplication;
+  readonly prisma: PrismaService;
+  readonly request: supertest.Agent;
+}
+
+// The full set of env vars any suite might pass as an override. Every key
+// here gets reset to its canonical default on *every* createTestApp call,
+// before that call's own overrides are applied. This has to be exhaustive:
+// Object.assign only ever adds/overwrites keys, it never removes one, so a
+// key missing from this object would leak whatever a *previous* call set on
+// process.env into every later call that doesn't explicitly override it —
+// this is exactly what test/harness.integration.test.ts guards against.
 const BASE_TEST_ENV: Record<string, string> = {
   NODE_ENV: 'test',
   API_PORT: '3001',
   JWT_SECRET: 'test-secret-that-is-at-least-32-chars',
   JWT_EXPIRES_IN: '12h',
   RABBITMQ_URL: 'amqp://guest:guest@localhost:5672',
+  REVIEW_SUBMIT_RATE_LIMIT: '5',
+  WEB_ORIGIN: 'http://localhost:3000',
 };
 
 /**
  * Boots the real Nest application against this worker's shared Postgres and
  * Redis containers (see global-setup.ts), running it through the exact same
  * `configureApp` bootstrap as `main.ts` — same global prefix, validation
- * pipe, and exception filter the running service uses. Every later
- * integration suite in this plan is built on this function.
+ * pipe, and exception filter the running service uses.
  *
  * `envOverrides` are applied to `process.env` before the Nest module is
  * compiled, so a single suite can run under a different configuration (for
- * example a tighter rate limit) without changing it for every other suite
- * sharing this worker's containers.
+ * example a tighter rate limit, or an unreachable Redis) without changing
+ * it for every other suite sharing this worker's containers. Every key in
+ * `BASE_TEST_ENV` is reset first, on every call, so an override from one
+ * call never leaks into the next call that doesn't repeat it.
+ *
+ * Most suites want {@link setupTestApp} instead — this function is exported
+ * for the cases that genuinely need manual control over the app's
+ * lifecycle: booting more than one app in the same test (see
+ * test/harness.integration.test.ts), or a deliberately broken configuration
+ * that only one test in a file needs (see the liveness/readiness test in
+ * test/health.integration.test.ts).
  */
 export async function createTestApp(envOverrides: Record<string, string> = {}): Promise<TestApp> {
   Object.assign(
@@ -70,5 +91,49 @@ export async function createTestApp(envOverrides: Record<string, string> = {}): 
     request: supertest(httpServer),
     truncate,
     close: () => app.close(),
+  };
+}
+
+/**
+ * The documented way for a suite to get a running application — this is
+ * what every later integration suite in this plan should call, at the top
+ * level of the test file:
+ *
+ * ```ts
+ * const ctx = setupTestApp();
+ * it('...', async () => { await ctx.request.get(...); });
+ * ```
+ *
+ * Wires the full lifecycle itself: creates the app once in `beforeAll`,
+ * truncates every table in `afterEach` so one test's rows never leak into
+ * the next (or into another suite sharing this worker's containers), and
+ * closes the app in `afterAll`. `createTestApp` remains available directly
+ * for the cases described on its own doc comment.
+ */
+export function setupTestApp(envOverrides?: Record<string, string>): TestContext {
+  let current: TestApp;
+
+  beforeAll(async () => {
+    current = await createTestApp(envOverrides);
+  });
+
+  afterEach(async () => {
+    await current.truncate();
+  });
+
+  afterAll(async () => {
+    await current.close();
+  });
+
+  return {
+    get app() {
+      return current.app;
+    },
+    get prisma() {
+      return current.prisma;
+    },
+    get request() {
+      return current.request;
+    },
   };
 }

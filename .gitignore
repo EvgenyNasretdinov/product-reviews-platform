@@ -8,4 +8,5 @@ coverage/
 .env
 .env.local
 .DS_Store
+.prisma-generate.lock
 .superpowers/

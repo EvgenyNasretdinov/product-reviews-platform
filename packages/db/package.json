@@ -12,18 +12,18 @@
     "seed": "tsx prisma/seed.ts"
   },
   "scripts": {
-    "generate": "prisma generate",
-    "build": "prisma generate && tsc -b",
-    "typecheck": "prisma generate && tsc --noEmit",
+    "generate": "./scripts/safe-generate.sh",
+    "build": "pnpm run generate && tsc -b",
+    "typecheck": "pnpm run generate && tsc --noEmit",
     "lint": "eslint .",
-    "pretest:unit": "prisma generate",
+    "pretest:unit": "pnpm run generate",
     "test:unit": "vitest run --passWithNoTests --exclude test/schema.integration.test.ts",
-    "pretest:integration": "prisma generate",
+    "pretest:integration": "pnpm run generate",
     "test:integration": "vitest run test/schema.integration.test.ts",
     "test": "vitest run test/schema.integration.test.ts",
-    "predb:migrate": "prisma generate",
+    "predb:migrate": "pnpm run generate",
     "db:migrate": "prisma migrate deploy",
-    "predb:seed": "prisma generate",
+    "predb:seed": "pnpm run generate",
     "db:seed": "prisma db seed"
   },
   "dependencies": {
