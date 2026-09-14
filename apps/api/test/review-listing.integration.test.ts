@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import type { Product, Review } from '@reviews/db';
 import type { ReviewDto } from '@reviews/contracts';
 import { describe, expect, it } from 'vitest';
 import { createProduct, createReview, createUser } from './fixtures.js';
 import { setupTestApp } from './harness.js';
+import { encodeCursor } from '../src/common/pagination/cursor.js';
 import type { PrismaService } from '../src/common/prisma/prisma.service.js';
+import { cursorScope } from '../src/reviews/reviews.service.js';
 
 // supertest's Response#body is typed `any`; narrow it through this shape
 // once instead of sprinkling eslint-disable comments at each access.
@@ -168,6 +171,34 @@ describe('GET /api/v1/products/:productId/reviews', () => {
     expect(new Set(collected).size).toBe(seeded.length);
   });
 
+  // Rating ties, mirroring case 6's structure but for sort=rating_asc
+  // specifically: ratings only span 1..5, so a tie is the normal case in
+  // production, not an edge case, and rating_asc is the one sort whose
+  // WHERE predicate mixes directions (column ascending, id tie-breaker
+  // still descending) — the sort most likely to get that mix wrong.
+  it('pages through rating_asc-sorted reviews without duplicates or gaps when ratings tie', async () => {
+    const { product } = await createProductWithAuthor(ctx.prisma);
+    const seeded = await seedApprovedReviews(ctx.prisma, product.id, [
+      { rating: 3 },
+      { rating: 3 },
+      { rating: 3 },
+      { rating: 1 },
+      { rating: 5 },
+    ]);
+
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const url = `/api/v1/products/${product.id}/reviews?sort=rating_asc&limit=2${cursor ? `&cursor=${cursor}` : ''}`;
+      const res: { body: ReviewListBody } = await ctx.request.get(url).expect(200);
+      collected.push(...res.body.items.map((r) => r.id));
+      cursor = res.body.nextCursor;
+    } while (cursor);
+
+    expect(collected.sort()).toEqual(seeded.map((r) => r.id).sort());
+    expect(new Set(collected).size).toBe(seeded.length);
+  });
+
   // Case 7. The scope check: a cursor minted under one sort must not be
   // silently replayed against another. This must fail loudly as a 400, not
   // crash as a 500 from a failed downstream parse.
@@ -183,6 +214,36 @@ describe('GET /api/v1/products/:productId/reviews', () => {
 
     await ctx.request
       .get(`/api/v1/products/${product.id}/reviews?sort=helpful&limit=1&cursor=${newestBody.nextCursor}`)
+      .expect(400);
+  });
+
+  // A cursor with a valid, *matching* scope but a garbage key must also
+  // fail as a 400, not a 500. decodeCursor only checks the key is a
+  // non-empty string (scope is what it validates); an unvalidated `Number()`
+  // on "abc" would hand Prisma a NaN bound that reaches Postgres and misses
+  // every known-error branch in the exception filter.
+  it('rejects a cursor with a non-numeric key under sort=helpful with 400', async () => {
+    const { product } = await createProductWithAuthor(ctx.prisma);
+    await seedApprovedReviews(ctx.prisma, product.id, [{}, {}]);
+
+    const garbageCursor = encodeCursor('not-a-number', randomUUID(), cursorScope('helpful'));
+
+    await ctx.request
+      .get(`/api/v1/products/${product.id}/reviews?sort=helpful&cursor=${garbageCursor}`)
+      .expect(400);
+  });
+
+  // As above, for the `createdAt` cursor column: an unvalidated `new Date()`
+  // on an unparseable string produces an Invalid Date, which would reach
+  // Prisma the same unchecked way a NaN would.
+  it('rejects a cursor with an unparseable date key under sort=newest with 400', async () => {
+    const { product } = await createProductWithAuthor(ctx.prisma);
+    await seedApprovedReviews(ctx.prisma, product.id, [{}, {}]);
+
+    const garbageCursor = encodeCursor('not-a-date', randomUUID(), cursorScope('newest'));
+
+    await ctx.request
+      .get(`/api/v1/products/${product.id}/reviews?sort=newest&cursor=${garbageCursor}`)
       .expect(400);
   });
 

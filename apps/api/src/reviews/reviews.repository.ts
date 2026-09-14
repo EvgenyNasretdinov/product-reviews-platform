@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { EVENT_TYPES, type ReviewSort } from '@reviews/contracts';
 import { Prisma, writeOutboxEvent, type Review } from '@reviews/db';
 import { PrismaService } from '../common/prisma/prisma.service.js';
@@ -32,6 +32,15 @@ interface SortDefinition {
  * repeat rows inside a tied group; see
  * test/review-listing.integration.test.ts's "pages through helpful-sorted
  * reviews without duplicates or gaps".
+ *
+ * The tie-breaker is `id` alone, not `id` plus a third column — `id` by
+ * itself already makes the ordering total (ids are unique), so a
+ * secondary column adds a cursor field for no ordering benefit. Within a
+ * tie, rows happen to display newest-first only because ids in this
+ * schema are UUIDv7, which are time-ordered; that's a side effect of the
+ * id scheme, not something this table encodes. If `Review.id` ever moves
+ * off v7 (e.g. to v4), pagination stays correct — `id` is still unique —
+ * but the display order of tied rows would stop tracking recency.
  */
 const SORTS: Record<ReviewSort, SortDefinition> = {
   helpful: { orderBy: [{ helpfulCount: 'desc' }, { id: 'desc' }], column: 'helpfulCount', direction: 'desc' },
@@ -44,6 +53,35 @@ const SORTS: Record<ReviewSort, SortDefinition> = {
 export function cursorKeyFor(sort: ReviewSort, row: Review): string | number {
   const value = row[SORTS[sort].column];
   return value instanceof Date ? value.toISOString() : value;
+}
+
+/**
+ * Parses a cursor key as the number a `helpfulCount`/`rating` cursor must
+ * carry. `decodeCursor` only checks that the key is a non-empty string —
+ * scope is what it validates — so a cursor with a correct, matching scope
+ * but a garbage key (`"abc"`) still has to be rejected here, with the same
+ * `BadRequestException` a scope mismatch gets. Left unchecked, `Number()`
+ * would hand Prisma a `NaN` bound, which reaches Postgres, misses every
+ * known-error branch in the global exception filter, and 500s — for a
+ * public endpoint taking attacker-controlled query-string input, that is
+ * exactly the "arbitrary server error instead of a clean client error"
+ * outcome the scope check exists to avoid.
+ */
+function parseCursorNumber(key: string): number {
+  const value = Number(key);
+  if (Number.isNaN(value)) {
+    throw new BadRequestException('invalid cursor');
+  }
+  return value;
+}
+
+/** As {@link parseCursorNumber}, for a `createdAt` cursor's date key. */
+function parseCursorDate(key: string): Date {
+  const value = new Date(key);
+  if (Number.isNaN(value.getTime())) {
+    throw new BadRequestException('invalid cursor');
+  }
+  return value;
 }
 
 /**
@@ -63,17 +101,17 @@ function cursorWhere(sort: ReviewSort, key: string, id: string): Prisma.ReviewWh
 
   switch (column) {
     case 'createdAt': {
-      const value = new Date(key);
+      const value = parseCursorDate(key);
       return { OR: [{ createdAt: isDesc ? { lt: value } : { gt: value } }, { createdAt: value, id: { lt: id } }] };
     }
     case 'helpfulCount': {
-      const value = Number(key);
+      const value = parseCursorNumber(key);
       return {
         OR: [{ helpfulCount: isDesc ? { lt: value } : { gt: value } }, { helpfulCount: value, id: { lt: id } }],
       };
     }
     case 'rating': {
-      const value = Number(key);
+      const value = parseCursorNumber(key);
       return { OR: [{ rating: isDesc ? { lt: value } : { gt: value } }, { rating: value, id: { lt: id } }] };
     }
   }

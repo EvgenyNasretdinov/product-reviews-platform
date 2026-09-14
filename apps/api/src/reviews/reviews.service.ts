@@ -115,7 +115,12 @@ export class ReviewsService {
  * a cursor is scoped at all. Prefixed (rather than the bare sort name) so
  * this namespace can never collide with another feature's cursor scope,
  * e.g. the product list's `'products'` scope.
+ *
+ * Exported so a test can mint a cursor with a *valid, matching* scope but
+ * a deliberately garbage key (see review-listing.integration.test.ts's
+ * cursor-validation cases) without hardcoding this module's private
+ * `'reviews:'` prefix as a second, drift-prone copy of the same string.
  */
-function cursorScope(sort: ReviewSort): string {
+export function cursorScope(sort: ReviewSort): string {
   return `reviews:${sort}`;
 }
