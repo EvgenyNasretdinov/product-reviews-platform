@@ -30,6 +30,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: env.jwtSecret,
+      // Without an explicit allow-list, jsonwebtoken defaults to accepting
+      // any HMAC algorithm (HS256/HS384/HS512) for a string secret. That
+      // happens to be safe today, but it's a library default rather than a
+      // stated intention, and defaults are not a contract across majors.
+      // Pinning to the one algorithm the signing side actually uses closes
+      // that off explicitly. Must match the `algorithm` set in
+      // AuthModule's JwtModule.registerAsync signOptions.
+      algorithms: ['HS256'],
     });
   }
 

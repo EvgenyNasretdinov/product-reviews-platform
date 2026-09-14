@@ -4,7 +4,7 @@ import type { SessionUserDto } from '@reviews/contracts';
 import type { Role } from '@reviews/db';
 import { describe, expect, it } from 'vitest';
 import { hashPassword } from '../src/auth/password.js';
-import { setupTestApp } from './harness.js';
+import { BASE_TEST_ENV, setupTestApp } from './harness.js';
 
 // supertest's Response#body is typed `any`; every test below narrows it
 // through this shape once instead of sprinkling eslint-disable comments
@@ -130,4 +130,28 @@ describe('GET /api/v1/auth/me', () => {
 
     await ctx.request.get('/api/v1/auth/me').auth(forgedToken, { type: 'bearer' }).expect(401);
   });
+
+  // Extra hardening case, beyond the brief's six: proves the `algorithms:
+  // ['HS256']` allow-list in JwtStrategy actually rejects something, not
+  // just that it exists. Signs with the *correct* secret, for a *real*
+  // user, but a different HMAC algorithm (HS384). The real user matters:
+  // without it, a rejected-for-any-reason token (including "no such user")
+  // would pass this assertion whether or not the allow-list did anything,
+  // which is exactly the kind of test that cannot fail for the reason it
+  // names. Without an explicit allow-list, jsonwebtoken accepts any
+  // HS-family algorithm for a string secret by default, so this token
+  // would have been accepted and returned that real user's data (200)
+  // before the allow-list was added — this is a different failure mode
+  // from case 6 (wrong secret), which an allow-list has no bearing on.
+  it('returns 401 for a real user token signed with the correct secret but an algorithm outside the allow-list', async () => {
+    const user = await seedUser({ email: 'alice@example.com', displayName: 'Alice Johnson', role: 'CUSTOMER' });
+
+    const forgedToken = new JwtService({ secret: BASE_TEST_ENV.JWT_SECRET }).sign(
+      { sub: user.id, email: user.email, role: user.role },
+      { algorithm: 'HS384' },
+    );
+
+    await ctx.request.get('/api/v1/auth/me').auth(forgedToken, { type: 'bearer' }).expect(401);
+  });
 });
+

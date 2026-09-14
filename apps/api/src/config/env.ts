@@ -1,4 +1,16 @@
+import ms from 'ms';
 import { z } from 'zod';
+
+// jsonwebtoken parses `expiresIn` with exactly this function (see
+// jsonwebtoken/lib/timespan.js) — a string it can't parse makes `sign()`
+// throw on the first login attempt rather than at boot. Validating with
+// the same parser here, rather than a hand-rolled regex that merely
+// approximates its grammar, is what lets envSchema reject a bad value at
+// startup with a clear message, which is the entire point of validating
+// env through one schema instead of reading `process.env` ad hoc.
+function isParsableDuration(value: string): value is ms.StringValue {
+  return typeof ms(value as ms.StringValue) === 'number';
+}
 
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -7,7 +19,9 @@ export const envSchema = z.object({
   REDIS_URL: z.string().url(),
   RABBITMQ_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
-  JWT_EXPIRES_IN: z.string().min(1),
+  JWT_EXPIRES_IN: z.string().min(1).refine(isParsableDuration, {
+    message: 'must be a duration jsonwebtoken/ms can parse, e.g. "12h", "7d", "3600"',
+  }),
   // Reviews per author per hour; see docs/design for the exact window.
   REVIEW_SUBMIT_RATE_LIMIT: z.coerce.number().int().positive().default(5),
   // Origin the browser-facing web app runs on; only ever used to permit
@@ -22,7 +36,7 @@ export interface AppEnv {
   redisUrl: string;
   rabbitmqUrl: string;
   jwtSecret: string;
-  jwtExpiresIn: string;
+  jwtExpiresIn: ms.StringValue;
   reviewSubmitRateLimit: number;
   webOrigin: string;
 }

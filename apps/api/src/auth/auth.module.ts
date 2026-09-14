@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
+import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { APP_ENV } from '../config/config.module.js';
 import type { AppEnv } from '../config/env.js';
@@ -23,13 +23,16 @@ import { JwtStrategy } from './jwt.strategy.js';
       inject: [APP_ENV],
       useFactory: (env: AppEnv) => ({
         secret: env.jwtSecret,
-        // env.jwtExpiresIn is validated by envSchema as a non-empty string
-        // (e.g. "12h"), not narrowed to jsonwebtoken's `StringValue`
-        // template-literal type — that type exists to catch a *literal*
-        // typo at compile time, which doesn't apply to a value read from
-        // the environment. jsonwebtoken parses it with `ms()` at runtime
-        // regardless of this cast.
-        signOptions: { expiresIn: env.jwtExpiresIn as JwtSignOptions['expiresIn'] },
+        // env.jwtExpiresIn is validated by envSchema against jsonwebtoken's
+        // own `ms()` parser (see config/env.ts), so it's already typed as
+        // `ms.StringValue` here — no cast needed.
+        //
+        // `algorithm` must match JwtStrategy's `algorithms` allow-list
+        // (jwt.strategy.ts): pinning both sides to HS256 explicitly, rather
+        // than relying on jsonwebtoken's default HMAC-family allow-list on
+        // the verify side, means the accepted algorithm is a stated
+        // intention instead of an implicit library default.
+        signOptions: { expiresIn: env.jwtExpiresIn, algorithm: 'HS256' },
       }),
     }),
   ],

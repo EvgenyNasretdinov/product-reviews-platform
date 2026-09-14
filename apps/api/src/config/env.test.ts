@@ -23,4 +23,16 @@ describe('loadEnv', () => {
   it('reports every invalid variable at once', () => {
     expect(() => loadEnv({ ...valid, API_PORT: 'nope', REDIS_URL: 'not-a-url' })).toThrow(/API_PORT[\s\S]*REDIS_URL/);
   });
+
+  it('rejects a JWT_EXPIRES_IN that jsonwebtoken/ms cannot parse', () => {
+    // A misconfigured value here must fail at boot (this test), not on the
+    // first login attempt — jsonwebtoken's sign() only discovers a bad
+    // expiresIn when it actually tries to use it.
+    expect(() => loadEnv({ ...valid, JWT_EXPIRES_IN: 'not-a-duration' })).toThrow(/JWT_EXPIRES_IN/);
+  });
+
+  it('accepts a plain-number JWT_EXPIRES_IN and one with a unit suffix', () => {
+    expect(loadEnv({ ...valid, JWT_EXPIRES_IN: '3600' }).jwtExpiresIn).toBe('3600');
+    expect(loadEnv({ ...valid, JWT_EXPIRES_IN: '7d' }).jwtExpiresIn).toBe('7d');
+  });
 });
