@@ -31,7 +31,7 @@ export interface TestContext {
 // key missing from this object would leak whatever a *previous* call set on
 // process.env into every later call that doesn't explicitly override it —
 // this is exactly what test/harness.integration.test.ts guards against.
-const BASE_TEST_ENV: Record<string, string> = {
+export const BASE_TEST_ENV: Record<string, string> = {
   NODE_ENV: 'test',
   API_PORT: '3001',
   JWT_SECRET: 'test-secret-that-is-at-least-32-chars',
