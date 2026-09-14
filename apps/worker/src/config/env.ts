@@ -17,12 +17,16 @@ export const envSchema = z.object({
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
-  // Optional, unlike DATABASE_URL/RABBITMQ_URL: only AggregationModule
-  // (Task 5's cache invalidation) needs it, and that module isn't wired
-  // into AppModule yet (later task), so requiring it here would fail every
-  // other suite's boot for a dependency they don't use. AggregationModule
-  // itself throws a clear error if it's ever constructed without one.
-  REDIS_URL: z.string().url().optional(),
+  // Required, like DATABASE_URL/RABBITMQ_URL: AggregationModule (Task 5's
+  // cache invalidation) is now wired into AppModule (Task 6), so every real
+  // boot needs it. It was optional for one task's duration, with the check
+  // relocated into AggregationModule's constructor — deliberately temporary,
+  // so `boot.integration.test.ts` didn't have to supply a value a
+  // not-yet-wired module wasn't using. Tightening it back here means a
+  // missing REDIS_URL is reported here, at startup, alongside every other
+  // configuration problem, instead of as a constructor throw at whatever
+  // moment Nest happens to instantiate AggregationModule.
+  REDIS_URL: z.string().url(),
 });
 
 export interface AppEnv {
@@ -32,7 +36,7 @@ export interface AppEnv {
   outboxBatchSize: number;
   outboxMaxAttempts: number;
   outboxPollIntervalMs: number;
-  redisUrl?: string;
+  redisUrl: string;
 }
 
 /**

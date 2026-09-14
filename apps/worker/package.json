@@ -11,7 +11,7 @@
     "start:dev": "nest start --watch",
     "pretest:unit": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",
     "test:unit": "vitest run --config vitest.config.ts",
-    "pretest:integration": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",
+    "pretest:integration": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build) && (test -d ../api/dist || pnpm --filter @reviews/api run build)",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
@@ -21,6 +21,7 @@
     "@reviews/db": "workspace:*",
     "amqplib": "^2.0.1",
     "ioredis": "^6.0.0",
+    "pino": "^10.3.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "zod": "^3.24.0"
@@ -34,7 +35,10 @@
     "@testcontainers/rabbitmq": "^12.1.0",
     "@testcontainers/redis": "^12.1.0",
     "@types/node": "^22.10.0",
+    "@types/supertest": "^7.2.1",
+    "argon2": "^0.45.1",
     "eslint": "^9.17.0",
+    "supertest": "^7.2.2",
     "typescript": "^5.7.0",
     "unplugin-swc": "^1.6.0",
     "vitest": "^3.0.0"

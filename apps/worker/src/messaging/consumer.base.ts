@@ -1,12 +1,25 @@
 import { eventEnvelopeSchema, eventPayloadSchemas, eventTypeSchema } from '@reviews/contracts';
-import { Logger } from '@nestjs/common';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
+import { forEvent } from '../observability/logger.js';
 import type { EventEnvelope } from './event.publisher.js';
 
 /** How many unacknowledged deliveries the broker may have in flight per consumer at once. */
 const PREFETCH = 10;
 
-const logger = new Logger('registerConsumer');
+/**
+ * What {@link registerConsumer} hands back: the broker-assigned consumer
+ * tag, plus the two operations graceful shutdown needs and a raw
+ * `channel.consume` call doesn't give a caller on its own — knowing how
+ * many deliveries are currently being handled, and stopping new ones from
+ * arriving without touching whatever is already in flight.
+ */
+export interface ConsumerHandle {
+  readonly consumerTag: string;
+  /** Deliveries currently dispatched to `handler` and not yet acked or nacked. */
+  inFlightCount(): number;
+  /** Cancels this consumer at the broker — no further deliveries arrive. Already-dispatched deliveries are unaffected and keep running. */
+  cancel(): Promise<void>;
+}
 
 /** Renders an unknown rejection reason as a log-safe string without risking `[object Object]` from a bare `String(value)`. */
 function describeError(value: unknown): string {
@@ -69,18 +82,39 @@ function parseEnvelope(raw: Buffer): EventEnvelope {
  * `channel.prefetch(10)` bounds how many unacked deliveries this consumer
  * can have outstanding at once, so a slow handler can't have the broker
  * hand it its entire backlog before any of it is acknowledged.
+ *
+ * The returned {@link ConsumerHandle} is what lets a caller shut this
+ * consumer down gracefully: `cancel()` stops new deliveries, and
+ * `inFlightCount()` says whether it's safe yet to close the channel out
+ * from under whatever `handler` call is still running. In-flight tracking
+ * lives here, not in the handler passed in, because it has to count every
+ * dispatched delivery — including the two that never reach `handler` at
+ * all (a null `msg` on cancel, a parse failure) — accurately from the one
+ * place that dispatches them.
  */
 export async function registerConsumer<E extends EventEnvelope = EventEnvelope>(
   channel: ConfirmChannel,
   queue: string,
   handler: (event: E) => Promise<void>,
-): Promise<void> {
+): Promise<ConsumerHandle> {
   await channel.prefetch(PREFETCH);
 
-  await channel.consume(queue, (msg: ConsumeMessage | null) => {
+  let inFlight = 0;
+  const { consumerTag } = await channel.consume(queue, (msg: ConsumeMessage | null) => {
     if (!msg) return;
-    void handleDelivery(channel, queue, msg, handler);
+    inFlight += 1;
+    void handleDelivery(channel, queue, msg, handler).finally(() => {
+      inFlight -= 1;
+    });
   });
+
+  return {
+    consumerTag,
+    inFlightCount: () => inFlight,
+    cancel: async () => {
+      await channel.cancel(consumerTag);
+    },
+  };
 }
 
 async function handleDelivery<E extends EventEnvelope>(
@@ -93,18 +127,24 @@ async function handleDelivery<E extends EventEnvelope>(
   try {
     envelope = parseEnvelope(msg.content);
   } catch (error) {
-    logger.warn(`dead-lettering a message on queue "${queue}" that failed to parse: ${describeError(error)}`);
+    forEvent({ queue }).warn(
+      { err: describeError(error) },
+      `dead-lettering a message on queue "${queue}" that failed to parse`,
+    );
     channel.nack(msg, false, false);
     return;
   }
 
+  const log = forEvent({ eventId: envelope.eventId, queue, reviewId: envelope.payload.reviewId });
+
   try {
     await handler(envelope as E);
     channel.ack(msg);
-    logger.log(`processed event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}"`);
+    log.info(`processed event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}"`);
   } catch (error) {
-    logger.error(
-      `dead-lettering event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}" after handler failure: ${describeError(error)}`,
+    log.error(
+      { err: describeError(error) },
+      `dead-lettering event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}" after handler failure`,
     );
     channel.nack(msg, false, false);
   }

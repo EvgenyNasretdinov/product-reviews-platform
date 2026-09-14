@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import amqplib, { type ChannelModel, type ConfirmChannel } from 'amqplib';
 import type { AppEnv } from '../config/env.js';
 import { assertTopology } from './topology.js';
@@ -58,9 +58,17 @@ function describeError(value: unknown): string {
  * still caps at `MAX_RECONNECT_DELAY_MS`, and logging escalates to error
  * level once a handful of attempts have failed in a row, so the outage is
  * loud in the logs even though the process itself keeps trying quietly.
+ *
+ * Deliberately *not* `OnModuleDestroy`: Nest runs every provider's
+ * `onModuleDestroy` before any provider's `onApplicationShutdown` (see
+ * `NestApplicationContext#close`), so a hook here would close the channel
+ * and connection before the relay had stopped or the consumers had
+ * drained their in-flight deliveries — exactly backwards from the order
+ * Task 6's graceful shutdown needs. `close()` is a plain method instead,
+ * called explicitly, last, by `AppModule`'s shutdown orchestrator.
  */
 @Injectable()
-export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
+export class AmqpConnection implements OnModuleInit {
   private readonly logger = new Logger(AmqpConnection.name);
   private connectionModel: ChannelModel | undefined;
   private channel: ConfirmChannel | undefined;
@@ -77,7 +85,8 @@ export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
     await this.connect();
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /** Closes the channel and connection and stops reconnecting. See the class doc comment for why this isn't an `OnModuleDestroy` hook. */
+  async close(): Promise<void> {
     this.shuttingDown = true;
     await this.channel?.close().catch(() => undefined);
     await this.connectionModel?.close().catch(() => undefined);

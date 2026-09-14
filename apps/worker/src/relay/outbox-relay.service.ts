@@ -1,6 +1,7 @@
-import { Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import type { PrismaClient } from '@reviews/db';
 import type { EventPublisher } from '../messaging/event.publisher.js';
+import { forEvent } from '../observability/logger.js';
 import { OutboxRepository } from './outbox.repository.js';
 
 export interface OutboxRelayConfig {
@@ -52,10 +53,16 @@ const TRANSACTION_TIMEOUT_HEADROOM_MS = 2_000;
  * it hopes something happened.
  */
 @Injectable()
-export class OutboxRelayService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class OutboxRelayService implements OnApplicationBootstrap {
   private readonly logger = new Logger(OutboxRelayService.name);
   private timer: NodeJS.Timeout | undefined;
-  private inFlight = false;
+  // The in-flight tick's own promise, not just a boolean — `stop()` alone
+  // only clears the interval, so a batch already inside `runOnce()` (mid
+  // transaction, possibly mid-publish) keeps running after `stop()`
+  // returns. `stopAndDrain()` is what a caller needing a real guarantee —
+  // graceful shutdown, specifically — awaits instead: it stops the loop
+  // *and* waits for whichever tick was already running to actually finish.
+  private currentTick: Promise<void> | undefined;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -68,21 +75,23 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
     this.start();
   }
 
-  onApplicationShutdown(): void {
-    this.stop();
-  }
-
   /** Starts the polling loop. A no-op if already started. */
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick();
+      this.tick();
     }, this.config.pollIntervalMs);
     // Never keep the process alive on its own — only real work should.
     this.timer.unref();
   }
 
-  /** Stops the polling loop. A no-op if already stopped. */
+  /**
+   * Stops the polling loop without waiting for a batch already in flight
+   * to finish. A no-op if already stopped. Exported mainly for tests that
+   * want the loop off without paying for a drain; graceful shutdown uses
+   * {@link stopAndDrain} instead, precisely because this alone is not
+   * enough to guarantee nothing is still running when it returns.
+   */
   stop(): void {
     if (!this.timer) return;
     clearInterval(this.timer);
@@ -90,23 +99,43 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
   }
 
   /**
-   * One interval tick. Guarded by `inFlight` so a batch that runs longer
-   * than `pollIntervalMs` cannot stack a second call behind it — without
-   * this, a slow batch (a sluggish broker, a large backlog) would pile up
-   * concurrent `runOnce` calls against the same instance, each claiming
-   * whatever the others left, for no benefit over just letting one run to
-   * completion and starting the next tick after.
+   * Stops the polling loop and waits for any tick already in flight to
+   * finish — the real drain `stop()` alone only nominally provides. This
+   * is what `AppModule`'s shutdown orchestrator calls: without it, a
+   * `SIGTERM` that lands mid-batch would return from `stop()`
+   * immediately while a transaction was still open, and the orchestrator
+   * would go on to close the channel and connection underneath it,
+   * turning an in-flight publish into a failure instead of letting it
+   * finish and commit cleanly.
    */
-  private async tick(): Promise<void> {
-    if (this.inFlight) return;
-    this.inFlight = true;
-    try {
-      await this.runOnce();
-    } catch (error) {
-      this.logger.error('outbox relay: poll failed', error instanceof Error ? error.stack : String(error));
-    } finally {
-      this.inFlight = false;
-    }
+  async stopAndDrain(): Promise<void> {
+    this.stop();
+    await this.currentTick;
+  }
+
+  /**
+   * One interval tick. Guarded by `currentTick` so a batch that runs
+   * longer than `pollIntervalMs` cannot stack a second call behind it —
+   * without this, a slow batch (a sluggish broker, a large backlog) would
+   * pile up concurrent `runOnce` calls against the same instance, each
+   * claiming whatever the others left, for no benefit over just letting
+   * one run to completion and starting the next tick after. Never itself
+   * rejects — `runOnce`'s own failure is caught and logged — so
+   * `stopAndDrain` can safely `await currentTick` without a `.catch`.
+   */
+  private tick(): void {
+    if (this.currentTick) return;
+    const run = this.runOnce()
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          this.logger.error('outbox relay: poll failed', error instanceof Error ? error.stack : String(error));
+        },
+      )
+      .finally(() => {
+        this.currentTick = undefined;
+      });
+    this.currentTick = run;
   }
 
   /**
@@ -165,6 +194,9 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
 
           await this.repository.markPublished(tx, row.id);
           published += 1;
+          forEvent({ eventId: row.envelope.eventId, reviewId: row.envelope.payload.reviewId }).info(
+            `outbox relay: published event ${row.envelope.eventId} (${row.envelope.eventType})`,
+          );
         }
       },
       { timeout: this.config.batchSize * PER_ROW_PUBLISH_BUDGET_MS + TRANSACTION_TIMEOUT_HEADROOM_MS },

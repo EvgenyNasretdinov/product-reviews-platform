@@ -293,4 +293,42 @@ describe('OutboxRelayService.runOnce', () => {
     const received = await h.consumeMany(TOPOLOGY.queues.moderation.name, 2, 5_000);
     expect(received).toHaveLength(2);
   });
+
+  /**
+   * Task 6's `stopAndDrain` exists specifically because `stop()` alone
+   * only nominally stops the relay — it clears the interval but does not
+   * wait for a batch already inside `runOnce()` to finish. This proves
+   * the drain is real: with a publish deliberately slow, `stopAndDrain()`
+   * must not resolve until that publish (and the mark-published write
+   * after it) has actually completed, and the row must end up published,
+   * not abandoned mid-batch.
+   */
+  it('stopAndDrain waits for a batch already in flight to finish, not just stops the interval', async () => {
+    const row = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+
+    const PUBLISH_DELAY_MS = 250;
+    const slowPublisher: EventPublisher = {
+      publish: async (envelope) => {
+        await new Promise((resolve) => setTimeout(resolve, PUBLISH_DELAY_MS));
+        await publisher.publish(envelope);
+      },
+    } as EventPublisher;
+
+    const slowRelay = new OutboxRelayService(h.prisma, slowPublisher, repository, { ...CONFIG, pollIntervalMs: 20 });
+    slowRelay.start();
+
+    // Give the interval one tick to fire and enter the slow publish before
+    // asking it to stop — otherwise stopAndDrain could race ahead of the
+    // first tick ever starting, and would trivially "pass" without ever
+    // exercising the drain at all.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const beforeDrain = Date.now();
+    await slowRelay.stopAndDrain();
+    const drainedAfterMs = Date.now() - beforeDrain;
+
+    expect(drainedAfterMs).toBeGreaterThanOrEqual(PUBLISH_DELAY_MS - 50);
+    const after = await h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after.publishedAt).not.toBeNull();
+  });
 });

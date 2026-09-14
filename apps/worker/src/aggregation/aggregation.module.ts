@@ -24,26 +24,20 @@ import { SummaryRepository } from './summary.repository.js';
  * token for whichever cache implementation is bound to it — an interface
  * has no runtime value to provide against, but a class does.
  *
- * `REDIS_URL` is optional on `AppEnv` (see `config/env.ts`) because this
- * module is not yet wired into `AppModule` — registering
- * `AggregationConsumer` onto `TOPOLOGY.queues.aggregation` alongside the
- * relay, the moderation consumer, and graceful shutdown is a later task's
- * job, the same way `RelayModule`'s own doc comment describes for itself.
- * Until then, nothing constructs this module outside of a caller that has
- * already configured Redis, so the factory below throws a clear error
- * rather than silently booting without a cache.
+ * `REDIS_URL` is a required field on `AppEnv` (see `config/env.ts`):
+ * `AppModule` wires this module in (Task 6), so every real boot needs it,
+ * and `envSchema` is what reports a missing value — at startup, alongside
+ * every other configuration problem — rather than this factory finding out
+ * on its own. It was optional for one task's duration, with the check
+ * living here instead; now that the schema is the real gate, `env.redisUrl`
+ * below is trusted rather than re-checked.
  */
 @Module({
   imports: [PrismaModule],
   providers: [
     {
       provide: Redis,
-      useFactory: (env: AppEnv): Redis => {
-        if (!env.redisUrl) {
-          throw new Error('AggregationModule requires REDIS_URL to be configured');
-        }
-        return new Redis(env.redisUrl, { maxRetriesPerRequest: 1, lazyConnect: false });
-      },
+      useFactory: (env: AppEnv): Redis => new Redis(env.redisUrl, { maxRetriesPerRequest: 1, lazyConnect: false }),
       inject: [APP_ENV],
     },
     {

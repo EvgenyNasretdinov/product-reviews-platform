@@ -12,6 +12,7 @@ const fakeEnv: AppEnv = {
   outboxBatchSize: 50,
   outboxMaxAttempts: 5,
   outboxPollIntervalMs: 500,
+  redisUrl: 'redis://fake-host-never-dialed:6379',
 };
 
 function makeFakeChannel(): ConfirmChannel {
@@ -131,13 +132,13 @@ describe('AmqpConnection', () => {
     expect(escalatingCalls.length).toBeGreaterThan(0);
   });
 
-  it('onModuleDestroy closes the channel and connection and does not reconnect', async () => {
+  it('close() closes the channel and connection and does not reconnect', async () => {
     const model = makeFakeChannelModel();
     const open: AmqpOpener = vi.fn(() => Promise.resolve(model));
     const connection = new AmqpConnection(fakeEnv, open);
     await connection.onModuleInit();
 
-    await connection.onModuleDestroy();
+    await connection.close();
 
     expect(model.closeMock).toHaveBeenCalledTimes(1);
     expect(() => connection.getChannel()).toThrow();

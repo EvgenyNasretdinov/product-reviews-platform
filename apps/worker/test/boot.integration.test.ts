@@ -27,6 +27,11 @@ describe('worker boot', () => {
     // worker's env; AppModule's ConfigModule validates it on every boot
     // regardless of whether RelayModule is wired into the graph yet.
     process.env.DATABASE_URL = inject('databaseUrl');
+    // REDIS_URL is required too (Task 6 tightened it back from the
+    // temporary optional it was during Task 5): AggregationModule is wired
+    // into AppModule now, and envSchema validates every variable at boot
+    // regardless of which module ends up using it.
+    process.env.REDIS_URL = inject('redisUrl');
   });
 
   afterAll(async () => {
