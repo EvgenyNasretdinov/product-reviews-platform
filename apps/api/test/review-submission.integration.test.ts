@@ -76,7 +76,12 @@ describe('POST /api/v1/products/:productId/reviews', () => {
     expect(row?.aggregateType).toBe('review');
     expect(row?.publishedAt).toBeNull();
 
-    const envelope = row?.payload as OutboxEnvelope;
+    // Prisma types a JSON column as `JsonValue` (a union including bare
+    // primitives and arrays), which doesn't overlap enough with the
+    // specific `OutboxEnvelope` shape for a direct assertion — hence the
+    // `unknown` layer TS itself suggests, the same escape hatch used
+    // elsewhere in this suite for supertest's untyped `Response#body`.
+    const envelope = row?.payload as unknown as OutboxEnvelope;
     expect(envelope.payload).toMatchObject({
       reviewId,
       productId: product.id,
