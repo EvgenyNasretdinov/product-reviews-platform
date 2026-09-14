@@ -5,6 +5,7 @@ import { CacheModule } from './common/cache/cache.module.js';
 import { PrismaModule } from './common/prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
 import { HealthModule } from './health/health.module.js';
+import { ModerationModule } from './moderation/moderation.module.js';
 import { ProductsModule } from './products/products.module.js';
 import { ReviewsModule } from './reviews/reviews.module.js';
 
@@ -18,6 +19,7 @@ import { ReviewsModule } from './reviews/reviews.module.js';
     HealthModule,
     ProductsModule,
     ReviewsModule,
+    ModerationModule,
   ],
 })
 export class AppModule {}

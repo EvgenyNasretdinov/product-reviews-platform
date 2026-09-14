@@ -231,6 +231,40 @@ export interface UpdateReviewPatch {
   body?: string;
 }
 
+export interface ModerationQueueParams {
+  status: ReviewStatus;
+  limit: number;
+  cursor?: { key: string; id: string };
+}
+
+export interface ModerationQueuePage {
+  /** At most `limit` rows — see {@link ListApprovedReviewsPage} for why. */
+  rows: ReviewWithAuthor[];
+  hasMore: boolean;
+}
+
+export interface DecideModerationParams {
+  reviewId: string;
+  decision: 'APPROVED' | 'REJECTED';
+  reason: string | null;
+}
+
+/**
+ * Thrown from inside {@link ReviewsRepository.decide} when `reviewId`
+ * doesn't currently match a `PENDING` or `FLAGGED` row — either no such
+ * review exists at all, or it does but has already been decided (by this
+ * call or a concurrent one). Both collapse onto the same
+ * {@link ModerationService}-level 409: from the caller's point of view, "no
+ * longer awaiting moderation" is the one fact that matters, not which of
+ * the two reasons produced it.
+ */
+export class ReviewNotAwaitingModerationError extends Error {
+  constructor(public readonly reviewId: string) {
+    super(`Review ${reviewId} is not awaiting moderation`);
+    this.name = 'ReviewNotAwaitingModerationError';
+  }
+}
+
 /**
  * Owns every Prisma call the reviews-submission flow makes.
  * `ReviewsService` and `ReviewsController` never see a Prisma type.
@@ -552,6 +586,102 @@ export class ReviewsRepository {
       where: { authorId },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: { author: { select: { id: true, displayName: true } } },
+    });
+  }
+
+  /**
+   * Keyset pagination over every review in `status`, newest first — the
+   * backing query for a moderator's queue. Reuses `SORTS.newest`'s
+   * `orderBy` and `cursorWhere('newest', …)`'s `WHERE` fragment rather than
+   * defining a second copy of "paginate by `(createdAt, id)` descending":
+   * a moderation queue has exactly one sort order, so there is no reason
+   * for it to duplicate the machinery {@link listApproved} already built
+   * to support four.
+   *
+   * Unlike `listApproved`, there is no `status: 'APPROVED'` floor here —
+   * `params.status` names whichever status the moderator is browsing
+   * (`FLAGGED` by default, or e.g. `PENDING`), and the full row (including
+   * `body`) comes back: a moderator cannot judge an excerpt, so this is
+   * the one listing in the codebase that doesn't need `toPublicReviewDto`'s
+   * trimming.
+   */
+  async listQueue(params: ModerationQueueParams): Promise<ModerationQueuePage> {
+    const { status, limit, cursor } = params;
+
+    const conditions: Prisma.ReviewWhereInput[] = [{ status }];
+    if (cursor) {
+      conditions.push(cursorWhere('newest', cursor.key, cursor.id));
+    }
+
+    const rows = await this.prisma.review.findMany({
+      where: { AND: conditions },
+      orderBy: SORTS.newest.orderBy,
+      take: limit + 1,
+      include: { author: { select: { id: true, displayName: true } } },
+    });
+
+    const hasMore = rows.length > limit;
+    return { rows: hasMore ? rows.slice(0, limit) : rows, hasMore };
+  }
+
+  /**
+   * Records a moderator's decision on `reviewId` as one conditional update
+   * inside one transaction: `updateMany` predicated on the row still being
+   * `PENDING` or `FLAGGED`, not `update` by id alone. That predicate *is*
+   * the concurrency guard — there is no separate `lockReviewRow` call here,
+   * unlike `castVote`/`update`/`remove` above. Those methods need a lock
+   * because they read a value (vote counts, ownership) that a concurrent
+   * writer could change out from under an unlocked read-then-write; this
+   * method's only question — "is the row still awaiting moderation?" — is
+   * exactly what the `WHERE status IN (...)` clause already answers
+   * atomically. Postgres serialises two concurrent `updateMany` calls
+   * against the same row via ordinary row-level locking: whichever commits
+   * first wins, and the second re-evaluates the same `WHERE` under its own
+   * snapshot and matches zero rows, because the first one already moved the
+   * status out of `PENDING`/`FLAGGED`. `updated.count === 0` is exactly
+   * that "someone else already decided this" case — see
+   * {@link ReviewNotAwaitingModerationError} — folding a manual lock in on
+   * top would add a blocking round trip the predicate already makes
+   * unnecessary.
+   *
+   * Approving sets `publishedAt` to now; rejecting clears it (a `FLAGGED`
+   * row is never itself published, but a `PENDING` one it was reachable
+   * from never was either, so `null` is correct either way). The outbox
+   * event — `review.approved` or `review.rejected` — is written only after
+   * `updateMany` confirms the transition actually happened, inside the same
+   * transaction: a conflict throws before `writeOutboxEvent` is ever
+   * called, so the transaction rolls back with no event and no state
+   * change, matching the "409, no outbox row" case load-bearing to this
+   * task.
+   */
+  async decide(params: DecideModerationParams): Promise<ReviewWithAuthor> {
+    const { reviewId, decision, reason } = params;
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.review.updateMany({
+        where: { id: reviewId, status: { in: ['PENDING', 'FLAGGED'] } },
+        data: {
+          status: decision,
+          moderationReason: reason,
+          publishedAt: decision === 'APPROVED' ? new Date() : null,
+        },
+      });
+      if (updated.count === 0) {
+        throw new ReviewNotAwaitingModerationError(reviewId);
+      }
+
+      const review = await tx.review.findUniqueOrThrow({
+        where: { id: reviewId },
+        include: { author: { select: { id: true, displayName: true } } },
+      });
+
+      await writeOutboxEvent(tx, {
+        eventType: decision === 'APPROVED' ? EVENT_TYPES.REVIEW_APPROVED : EVENT_TYPES.REVIEW_REJECTED,
+        aggregateId: reviewId,
+        payload: { reviewId, productId: review.productId, status: decision, moderationReason: reason },
+      });
+
+      return review;
     });
   }
 }
