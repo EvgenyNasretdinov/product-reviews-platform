@@ -68,6 +68,72 @@ describe('GET /api/v1/products', () => {
     expect(body.items.map((item) => item.id)).toEqual([chair.id]);
   });
 
+  // Case 4, description branch: the `OR` on `description` is a separate
+  // code path from the `name` branch above and is otherwise unverified.
+  it('matches q case-insensitively on description when the name does not match', async () => {
+    const giftBox = await createProduct(ctx.prisma, {
+      slug: 'mystery-box',
+      name: 'Mystery Box',
+      description: 'A surprise gift wrapped in recycled cardboard.',
+    });
+    await createProduct(ctx.prisma, {
+      slug: 'unrelated-gadget',
+      name: 'Unrelated Gadget',
+      description: 'Does not mention the search term at all.',
+    });
+
+    const res = await ctx.request.get('/api/v1/products?q=CARDBOARD').expect(200);
+
+    const body = res.body as ProductListBody;
+    expect(body.items.map((item) => item.id)).toEqual([giftBox.id]);
+  });
+
+  // Regression test for the `AND`-combined where clause in
+  // products.repository.ts. The brief's illustrative `where` snippet spreads
+  // a `q`-derived `OR` and a `cursor`-derived `OR` into the same object
+  // literal; a plain object can only hold one `OR` key, so the second spread
+  // silently overwrites the first the moment a request carries *both* `q`
+  // and `cursor` — dropping the search filter on every page after the
+  // first. Written against that spread-`OR` form, this test fails: page two
+  // would include the unrelated product below instead of just the matching
+  // one. Written against the `AND`-combined form actually shipped, it
+  // passes.
+  it('keeps the q filter applied on a second page fetched with a cursor', async () => {
+    const gadgetAlpha = await createProduct(ctx.prisma, {
+      slug: 'gadget-alpha',
+      name: 'Gadget Alpha',
+      createdAt: new Date('2026-02-04T00:00:00Z'),
+    });
+    const gadgetBeta = await createProduct(ctx.prisma, {
+      slug: 'gadget-beta',
+      name: 'Gadget Beta',
+      createdAt: new Date('2026-02-03T00:00:00Z'),
+    });
+    // Sits between gadgetBeta and gadgetGamma in createdAt order, and does
+    // NOT match q — if the search filter is dropped on the cursor request,
+    // this is the product that leaks into page two.
+    await createProduct(ctx.prisma, {
+      slug: 'silent-case',
+      name: 'Silent Case',
+      createdAt: new Date('2026-02-02T00:00:00Z'),
+    });
+    const gadgetGamma = await createProduct(ctx.prisma, {
+      slug: 'gadget-gamma',
+      name: 'Gadget Gamma',
+      createdAt: new Date('2026-02-01T00:00:00Z'),
+    });
+
+    const page1 = await ctx.request.get('/api/v1/products?q=gadget&limit=2').expect(200);
+    const body1 = page1.body as ProductListBody;
+    expect(body1.items.map((item) => item.id)).toEqual([gadgetAlpha.id, gadgetBeta.id]);
+    expect(body1.nextCursor).not.toBeNull();
+
+    const page2 = await ctx.request.get(`/api/v1/products?q=gadget&limit=2&cursor=${body1.nextCursor}`).expect(200);
+    const body2 = page2.body as ProductListBody;
+    expect(body2.items.map((item) => item.id)).toEqual([gadgetGamma.id]);
+    expect(body2.nextCursor).toBeNull();
+  });
+
   // Case 5 — the brief's worked example.
   it('reports the rating distribution for a product', async () => {
     const product = await createProduct(ctx.prisma, { slug: 'desk-lamp' });

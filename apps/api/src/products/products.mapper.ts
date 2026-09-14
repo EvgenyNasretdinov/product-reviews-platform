@@ -41,10 +41,12 @@ export function toProductDto(row: ProductWithSummary): ProductDto {
     slug: row.slug,
     name: row.name,
     description: row.description,
-    // The schema allows a null image (Product.imageUrl is optional at the
-    // storage layer); the DTO does not. Every fixture and seed row sets one,
-    // so this fallback only matters for a row created outside that path.
-    imageUrl: row.imageUrl ?? '',
+    // Product.imageUrl is nullable at the storage layer (a product can
+    // exist with no image yet), and the DTO says so too rather than
+    // papering over it with a fake empty string that claims to be a URL
+    // and isn't — every consumer would otherwise have to learn that ''
+    // secretly means "no image". null says it once, in the type.
+    imageUrl: row.imageUrl,
     priceCents: row.priceCents,
     currency: row.currency,
   };

@@ -19,7 +19,7 @@ export const productDtoSchema = z.object({
   slug: z.string(),
   name: z.string(),
   description: z.string(),
-  imageUrl: z.string().url(),
+  imageUrl: z.string().url().nullable(),
   priceCents: z.number().int().nonnegative(),
   currency: z.string(),
 });

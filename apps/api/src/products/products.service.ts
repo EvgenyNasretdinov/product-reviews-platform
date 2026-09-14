@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { ProductDetailDto } from '@reviews/contracts';
+import { paginatedSchema, productDetailDtoSchema, type ProductDetailDto } from '@reviews/contracts';
+import type { z } from 'zod';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toProductDetailDto } from './products.mapper.js';
 import { ProductsRepository } from './products.repository.js';
@@ -13,10 +14,12 @@ export interface ListProductsQuery {
   limit: number;
 }
 
-export interface ListProductsResult {
-  items: ProductDetailDto[];
-  nextCursor: string | null;
-}
+// Derived from the shared contract rather than hand-restated: if
+// `paginatedSchema`'s field names ever change (e.g. `nextCursor` renamed),
+// this type — and every call site that builds one — fails to compile
+// instead of silently drifting from what the contract actually promises.
+export const productListSchema = paginatedSchema(productDetailDtoSchema);
+export type ListProductsResult = z.infer<typeof productListSchema>;
 
 @Injectable()
 export class ProductsService {

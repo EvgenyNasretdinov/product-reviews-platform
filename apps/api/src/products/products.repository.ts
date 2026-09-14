@@ -11,7 +11,7 @@ export interface ListProductsParams {
   cursor?: { key: string; id: string };
 }
 
-export interface ListProductsResult {
+export interface ListProductsPage {
   /** At most `limit` rows — the lookahead row used to compute `hasMore` is trimmed off. */
   rows: ProductWithSummary[];
   hasMore: boolean;
@@ -36,11 +36,13 @@ export class ProductsRepository {
    * naive reading of "OR for search, OR for cursor" might suggest): a
    * plain object can only hold one `OR` key, so spreading both into the
    * same literal would silently let the second overwrite the first once a
-   * request carries both `q` and `cursor`. None of this task's cases
-   * exercise that combination, but wiring it correctly costs nothing here
-   * and avoids a latent bug the moment they do.
+   * request carries both `q` and `cursor` — dropping the search filter on
+   * every page after the first. test/products.integration.test.ts covers
+   * exactly this combination ("keeps the q filter applied on a second page
+   * fetched with a cursor"), which fails against the spread-`OR` form and
+   * passes against this one.
    */
-  async list(params: ListProductsParams): Promise<ListProductsResult> {
+  async list(params: ListProductsParams): Promise<ListProductsPage> {
     const { q, limit, cursor } = params;
 
     const conditions: Prisma.ProductWhereInput[] = [];
