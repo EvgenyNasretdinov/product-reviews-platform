@@ -28,10 +28,34 @@ import type { Prisma } from '@reviews/db';
  * approved review was just unpublished — the catalogue reads this table
  * directly, so a `NULL` average would need to be special-cased by every
  * reader, and a *missing* row would be worse still.
+ *
+ * Idempotent under *sequential* redelivery is not the same guarantee as
+ * correct under *concurrent* delivery, which `PREFETCH = 10`
+ * (`consumer.base.ts`) makes routine: two `review.approved` events for the
+ * same product, dispatched to two concurrent handler calls, each take
+ * their own snapshot of `reviews` before either writes. Postgres does not
+ * re-run the `SELECT` after an `ON CONFLICT` conflict recheck, so whichever
+ * transaction's `UPDATE` commits second overwrites the row with values
+ * computed from *its own* (possibly older) snapshot — not a fresh one —
+ * and the projection can end up permanently behind, wrong until some
+ * unrelated later event happens to correct it. `pg_advisory_xact_lock`,
+ * keyed on `productId` and taken as the first statement below, serialises
+ * concurrent `recompute` calls for the *same* product (different products
+ * still run fully in parallel — the lock key is per-product, and the lock
+ * is released automatically at transaction end): the second call blocks
+ * until the first commits, and then takes its snapshot *after* that
+ * commit, so it sees the first call's write and recomputes from the true
+ * current state rather than a stale one.
  */
 @Injectable()
 export class SummaryRepository {
   async recompute(tx: Prisma.TransactionClient, productId: string): Promise<void> {
+    // Must be the first statement: it serialises everything below against
+    // any other `recompute` call for the same product, and does nothing
+    // for a call that arrives after this transaction has already
+    // committed (or rolled back) and released the lock.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${productId}))`;
+
     await tx.$executeRaw`
       INSERT INTO product_rating_summary (
         product_id, review_count, rating_sum, average_rating,
