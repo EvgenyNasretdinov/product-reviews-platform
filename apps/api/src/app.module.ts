@@ -6,8 +6,18 @@ import { PrismaModule } from './common/prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
 import { HealthModule } from './health/health.module.js';
 import { ProductsModule } from './products/products.module.js';
+import { ReviewsModule } from './reviews/reviews.module.js';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, RedisModule, CacheModule, AuthModule, HealthModule, ProductsModule],
+  imports: [
+    ConfigModule,
+    PrismaModule,
+    RedisModule,
+    CacheModule,
+    AuthModule,
+    HealthModule,
+    ProductsModule,
+    ReviewsModule,
+  ],
 })
 export class AppModule {}
