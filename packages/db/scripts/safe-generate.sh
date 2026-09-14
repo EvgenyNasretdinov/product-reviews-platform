@@ -3,18 +3,26 @@
 # every workspace package that resolves @prisma/client (the same physical
 # path inside the pnpm store, regardless of which package's `prisma
 # generate` triggered it). Two `prisma generate` processes running at the
-# same time — e.g. turbo scheduling this package's own `build` and
-# `test:integration` in parallel (both call this script), or apps/api's
-# integration harness shelling out to `db:migrate` (which also calls this
-# script) while either of those is still running — can each partially
-# overwrite that binary and corrupt it (see docs/plans task-5 review: a
-# corrupted libquery_engine-*.dylib.node failed to dlopen).
+# same time can each partially overwrite that binary and corrupt it (see
+# docs/plans task-5 review: a corrupted libquery_engine-*.dylib.node failed
+# to dlopen).
 #
-# Every script in this package that used to call `prisma generate` directly
-# now calls this one instead, so there is exactly one place that actually
-# generates the client, and a simple mkdir-based lock (atomic on POSIX,
-# which is all this project targets) makes concurrent callers queue instead
-# of racing.
+# Since the event-pipeline branch's review, turbo.json declares `generate`
+# as its own first-class task that `build`/`test:unit`/`test:integration`
+# depend on, so turbo itself now guarantees only one `generate` ever runs
+# at a time *for those*, without help from this script. What this lock
+# still guards: `predb:migrate`/`predb:seed` (this package's own
+# `package.json`) call `pnpm run generate` every time `db:migrate`/
+# `db:seed` runs, and every worker/api integration suite's
+# `global-setup.ts` shells out to `db:migrate` from its own process —
+# two such suites starting at once (the ordinary case under turbo) can
+# still race two `generate` invocations against each other outside the
+# task graph turbo sees.
+#
+# Every script in this package that calls `prisma generate` calls this one
+# instead, so there is exactly one place that actually generates the
+# client, and a simple mkdir-based lock (atomic on POSIX, which is all this
+# project targets) makes concurrent callers queue instead of racing.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,7 +31,6 @@ LOCK_DIR="$SCRIPT_DIR/../.prisma-generate.lock"
 release() {
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
-trap release EXIT
 
 attempts=0
 until mkdir "$LOCK_DIR" 2>/dev/null; do
@@ -34,5 +41,10 @@ until mkdir "$LOCK_DIR" 2>/dev/null; do
   fi
   sleep 0.1
 done
+# Only installed once this process actually holds the lock: installing it
+# before the acquire loop meant the timeout path (`exit 1` above) also ran
+# `release`, `rmdir`-ing a lock directory this process never created and
+# some *other* still-running process still held.
+trap release EXIT
 
 pnpm exec prisma generate

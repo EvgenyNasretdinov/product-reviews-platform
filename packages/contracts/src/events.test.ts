@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EVENT_TYPES, eventEnvelopeSchema, reviewSubmittedPayloadSchema } from './events.js';
+import { EVENT_TYPES, eventEnvelopeSchema, reviewModeratedPayloadSchema, reviewSubmittedPayloadSchema } from './events.js';
 
 const envelope = eventEnvelopeSchema(reviewSubmittedPayloadSchema);
 
@@ -50,5 +50,56 @@ describe('eventEnvelopeSchema', () => {
 
   it('rejects an envelope with an unknown top-level field', () => {
     expect(() => envelope.parse({ ...validEnvelope, extra: 'unexpected' })).toThrow();
+  });
+});
+
+// `decidedBy` distinguishes a human moderator's decision from the automatic
+// classifier's: `moderatorId` alone can't, since a bare nullable uuid would
+// make null mean both "decided automatically" and "we forgot to record it".
+// The refine below is what keeps the two `decidedBy` values from ever
+// disagreeing with `moderatorId`'s presence — a refine nobody tests is just
+// a comment, hence both directions get their own case.
+const validModeratedPayload = {
+  reviewId: '0193a6f0-0000-7000-8000-000000000002',
+  productId: '0193a6f0-0000-7000-8000-000000000003',
+  status: 'APPROVED',
+  moderationReason: null,
+} as const;
+
+describe('reviewModeratedPayloadSchema', () => {
+  it('accepts a MODERATOR decision carrying a moderatorId', () => {
+    const result = reviewModeratedPayloadSchema.safeParse({
+      ...validModeratedPayload,
+      decidedBy: 'MODERATOR',
+      moderatorId: '0193a6f0-0000-7000-8000-000000000004',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts an AUTOMATIC decision carrying no moderatorId', () => {
+    const result = reviewModeratedPayloadSchema.safeParse({
+      ...validModeratedPayload,
+      decidedBy: 'AUTOMATIC',
+      moderatorId: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an AUTOMATIC decision that carries a moderatorId', () => {
+    const result = reviewModeratedPayloadSchema.safeParse({
+      ...validModeratedPayload,
+      decidedBy: 'AUTOMATIC',
+      moderatorId: '0193a6f0-0000-7000-8000-000000000004',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a MODERATOR decision with no moderatorId', () => {
+    const result = reviewModeratedPayloadSchema.safeParse({
+      ...validModeratedPayload,
+      decidedBy: 'MODERATOR',
+      moderatorId: null,
+    });
+    expect(result.success).toBe(false);
   });
 });

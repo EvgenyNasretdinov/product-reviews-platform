@@ -1,0 +1,68 @@
+import { z } from 'zod';
+
+export const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  DATABASE_URL: z.string().url(),
+  RABBITMQ_URL: z.string().url(),
+  // Outbox relay tuning (Task 2). All three default so a bare RABBITMQ_URL +
+  // DATABASE_URL is still enough to boot in development; production can
+  // tighten them without a code change.
+  //
+  // OUTBOX_BATCH_SIZE's default is capped by the relay's per-batch
+  // transaction timeout, not by throughput: the whole batch's publishes
+  // run inside one transaction (see outbox-relay.service.ts's `runOnce`),
+  // so a bigger batch needs a longer timeout budget, not the other way
+  // round. 20 comfortably fits that budget with room to spare — see
+  // PER_ROW_PUBLISH_BUDGET_MS/TRANSACTION_TIMEOUT_HEADROOM_MS.
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(20),
+  OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
+  // Required, like DATABASE_URL/RABBITMQ_URL: AggregationModule (Task 5's
+  // cache invalidation) is now wired into AppModule (Task 6), so every real
+  // boot needs it. It was optional for one task's duration, with the check
+  // relocated into AggregationModule's constructor — deliberately temporary,
+  // so `boot.integration.test.ts` didn't have to supply a value a
+  // not-yet-wired module wasn't using. Tightening it back here means a
+  // missing REDIS_URL is reported here, at startup, alongside every other
+  // configuration problem, instead of as a constructor throw at whatever
+  // moment Nest happens to instantiate AggregationModule.
+  REDIS_URL: z.string().url(),
+});
+
+export interface AppEnv {
+  nodeEnv: 'development' | 'test' | 'production';
+  databaseUrl: string;
+  rabbitmqUrl: string;
+  outboxBatchSize: number;
+  outboxMaxAttempts: number;
+  outboxPollIntervalMs: number;
+  redisUrl: string;
+}
+
+/**
+ * Parses and validates the process environment through a single Zod schema.
+ *
+ * On failure every invalid variable is reported in one thrown Error rather
+ * than only the first one Zod encounters, so a misconfigured deployment
+ * fails once with a full list instead of one restart per typo. Mirrors
+ * `apps/api/src/config/env.ts`; this worker's own env grows in later
+ * tasks (cache) as those pieces land.
+ */
+export function loadEnv(source: NodeJS.ProcessEnv): AppEnv {
+  const result = envSchema.safeParse(source);
+  if (!result.success) {
+    const message = result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('\n');
+    throw new Error(message);
+  }
+
+  const env = result.data;
+  return {
+    nodeEnv: env.NODE_ENV,
+    databaseUrl: env.DATABASE_URL,
+    rabbitmqUrl: env.RABBITMQ_URL,
+    outboxBatchSize: env.OUTBOX_BATCH_SIZE,
+    outboxMaxAttempts: env.OUTBOX_MAX_ATTEMPTS,
+    outboxPollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
+    redisUrl: env.REDIS_URL,
+  };
+}

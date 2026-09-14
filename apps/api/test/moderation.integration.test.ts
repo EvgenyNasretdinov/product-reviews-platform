@@ -189,8 +189,13 @@ describe('POST /api/v1/moderation/reviews/:id', () => {
 
     const events = await ctx.prisma.outboxEvent.findMany({ where: { aggregateId: review.id } });
     expect(events).toHaveLength(1);
-    const envelope = events[0]?.payload as { payload: { moderatorId: string } };
+    const envelope = events[0]?.payload as { payload: { moderatorId: string; decidedBy: string } };
     expect(envelope.payload.moderatorId).toBe(moderator.id);
+    // A manual decision through this endpoint always carries a real actor —
+    // `decidedBy: 'MODERATOR'` is what distinguishes this event from the
+    // automatic classifier's, which records `'AUTOMATIC'` with a null
+    // moderatorId instead. See reviewModeratedPayloadSchema's refine.
+    expect(envelope.payload.decidedBy).toBe('MODERATOR');
   });
 
   // Case 6.

@@ -1,0 +1,161 @@
+import { createPrismaClient, type PrismaClient } from '@reviews/db';
+import amqplib, { type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
+import { Redis } from 'ioredis';
+import { inject } from 'vitest';
+import type { CacheService } from '../src/cache/cache.service.js';
+import { RedisCacheService } from '../src/cache/redis-cache.service.js';
+import { EventPublisher, type EventEnvelope } from '../src/messaging/event.publisher.js';
+import { assertTopology, dlqName, TOPOLOGY } from '../src/messaging/topology.js';
+
+export interface WorkerHarness {
+  readonly prisma: PrismaClient;
+  readonly channel: ConfirmChannel;
+  /** A real `CacheService`, backed by the Redis container started in global-setup.ts. */
+  readonly cache: CacheService;
+  publish(envelope: EventEnvelope): Promise<void>;
+  /**
+   * Sends `content` straight to `queue`, bypassing the exchange and
+   * `EventPublisher` entirely — unlike `publish`, this can put a body on a
+   * queue that isn't a valid envelope at all, which is exactly what the
+   * "malformed message" consumer test needs: a real publisher, built on
+   * `@reviews/contracts`, can't produce a bad envelope to publish.
+   */
+  publishRaw(queue: string, content: unknown): Promise<void>;
+  /** Resolves with the next message delivered to `queue`, acking it, or rejects after `timeoutMs`. */
+  consumeOne(queue: string, timeoutMs: number): Promise<ConsumeMessage>;
+  /**
+   * Resolves with the next `count` messages delivered to `queue`, in
+   * delivery order, acking each. Rejects if `count` messages have not
+   * all arrived within `timeoutMs` of the call starting.
+   */
+  consumeMany(queue: string, count: number, timeoutMs?: number): Promise<ConsumeMessage[]>;
+  /** Empties every declared queue and dead-letter queue. Call between tests. */
+  purgeAll(): Promise<void>;
+  close(): Promise<void>;
+}
+
+const ALL_QUEUES = Object.values(TOPOLOGY.queues).flatMap((queue) => [queue.name, dlqName(queue.name)]);
+
+/**
+ * Builds a worker test harness backed by the Postgres and RabbitMQ
+ * containers started once per worker in global-setup.ts. Opens its own
+ * connection and confirm channel (topology already asserted here, so
+ * `consumeOne`/`purgeAll` have something to act on immediately) and wires
+ * `publish` through the real {@link EventPublisher}, so the publisher
+ * integration tests exercise the exact class the app ships, not a
+ * re-implementation of it.
+ */
+export async function createWorkerHarness(): Promise<WorkerHarness> {
+  const prisma = createPrismaClient(inject('databaseUrl'));
+  const connectionModel: ChannelModel = await amqplib.connect(inject('rabbitmqUrl'));
+  const channel = await connectionModel.createConfirmChannel();
+  await assertTopology(channel);
+  const redis = new Redis(inject('redisUrl'), { maxRetriesPerRequest: 1, lazyConnect: false });
+  const cache = new RedisCacheService(redis);
+
+  const publisher = new EventPublisher({ getChannel: () => channel });
+
+  return {
+    prisma,
+    channel,
+    cache,
+    publish: (envelope) => publisher.publish(envelope),
+    publishRaw: (queue, content) => {
+      channel.sendToQueue(queue, Buffer.from(JSON.stringify(content)), { persistent: true });
+      return Promise.resolve();
+    },
+    consumeOne: (queue, timeoutMs) => consumeOne(channel, queue, timeoutMs),
+    consumeMany: (queue, count, timeoutMs = 5_000) => consumeMany(channel, queue, count, timeoutMs),
+    async purgeAll() {
+      for (const queue of ALL_QUEUES) await channel.purgeQueue(queue);
+    },
+    async close() {
+      await channel.close();
+      await connectionModel.close();
+      await prisma.$disconnect();
+      redis.disconnect();
+    },
+  };
+}
+
+function consumeOne(channel: ConfirmChannel, queue: string, timeoutMs: number): Promise<ConsumeMessage> {
+  return new Promise<ConsumeMessage>((resolve, reject) => {
+    let settled = false;
+    let consumerTag: string | undefined;
+
+    const finish = (run: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (consumerTag) channel.cancel(consumerTag).catch(() => undefined);
+      run();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`consumeOne timeout: no message on queue "${queue}" within ${timeoutMs}ms`)));
+    }, timeoutMs);
+
+    channel
+      .consume(queue, (msg) => {
+        if (!msg) return;
+        channel.ack(msg);
+        finish(() => resolve(msg));
+      })
+      .then((ok) => {
+        consumerTag = ok.consumerTag;
+        // The timeout can fire before this promise resolves (a very short
+        // timeoutMs); cancel immediately once we finally have a tag.
+        if (settled) channel.cancel(consumerTag).catch(() => undefined);
+      })
+      .catch((error: unknown) => {
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      });
+  });
+}
+
+/**
+ * Like {@link consumeOne} but collects `count` messages, in delivery
+ * order, before resolving. `timeoutMs` bounds the whole collection, not
+ * each individual message, so a queue that delivers 19 of 20 expected
+ * messages still times out instead of hanging forever on the last one.
+ */
+function consumeMany(channel: ConfirmChannel, queue: string, count: number, timeoutMs: number): Promise<ConsumeMessage[]> {
+  return new Promise<ConsumeMessage[]>((resolve, reject) => {
+    const received: ConsumeMessage[] = [];
+    let settled = false;
+    let consumerTag: string | undefined;
+
+    const finish = (run: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (consumerTag) channel.cancel(consumerTag).catch(() => undefined);
+      run();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `consumeMany timeout: received ${received.length}/${count} messages on queue "${queue}" within ${timeoutMs}ms`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+
+    channel
+      .consume(queue, (msg) => {
+        if (!msg || settled) return;
+        channel.ack(msg);
+        received.push(msg);
+        if (received.length >= count) finish(() => resolve(received));
+      })
+      .then((ok) => {
+        consumerTag = ok.consumerTag;
+        if (settled) channel.cancel(consumerTag).catch(() => undefined);
+      })
+      .catch((error: unknown) => {
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      });
+  });
+}
