@@ -1,33 +1,8 @@
-import {
-  EVENT_TYPES,
-  eventEnvelopeSchema,
-  eventTypeSchema,
-  reviewModeratedPayloadSchema,
-  reviewSubmittedPayloadSchema,
-  reviewUnpublishedPayloadSchema,
-  type EventType,
-} from '@reviews/contracts';
+import { eventEnvelopeSchema, eventPayloadSchemas, eventTypeSchema } from '@reviews/contracts';
 import { Injectable } from '@nestjs/common';
 import type { Prisma, PrismaClient } from '@reviews/db';
 import type { ZodTypeAny } from 'zod';
 import type { EventEnvelope } from '../messaging/event.publisher.js';
-
-/**
- * Maps every domain event type to the Zod schema its business payload must
- * satisfy. Duplicated from (rather than imported out of) `@reviews/db`'s
- * `writeOutboxEvent` — that map is a module-private constant there — but
- * kept in lockstep with it deliberately: both exist so that a payload
- * validated on the way in (`writeOutboxEvent`) is validated the same way
- * on the way out (here), and `packages/contracts` remains the one place
- * that actually defines the shapes both sides check against.
- */
-const PAYLOAD_SCHEMAS: Record<EventType, ZodTypeAny> = {
-  [EVENT_TYPES.REVIEW_SUBMITTED]: reviewSubmittedPayloadSchema,
-  [EVENT_TYPES.REVIEW_APPROVED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_REJECTED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_FLAGGED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_UNPUBLISHED]: reviewUnpublishedPayloadSchema,
-};
 
 /**
  * Parses `outbox.payload` back into the envelope shape
@@ -49,7 +24,7 @@ export function parseEnvelope(payload: unknown): EventEnvelope {
     throw new Error('outbox relay: stored payload has no recognised eventType');
   }
 
-  const schema: ZodTypeAny | undefined = PAYLOAD_SCHEMAS[typeResult.data];
+  const schema: ZodTypeAny | undefined = eventPayloadSchemas[typeResult.data];
   if (!schema) {
     throw new Error(`outbox relay: unknown event type "${typeResult.data}"`);
   }

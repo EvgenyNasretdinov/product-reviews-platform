@@ -1,33 +1,7 @@
-import {
-  EVENT_TYPES,
-  eventEnvelopeSchema,
-  reviewModeratedPayloadSchema,
-  reviewSubmittedPayloadSchema,
-  reviewUnpublishedPayloadSchema,
-  type EventType,
-} from '@reviews/contracts';
+import { eventEnvelopeSchema, eventPayloadSchemas, type EventType } from '@reviews/contracts';
 import type { Prisma } from '@prisma/client';
 import { v7 as uuidv7 } from 'uuid';
 import type { ZodTypeAny } from 'zod';
-
-/**
- * Maps every domain event type to the Zod schema its business payload must
- * satisfy. `REVIEW_APPROVED`, `REVIEW_REJECTED`, and `REVIEW_FLAGGED` share
- * `reviewModeratedPayloadSchema` — moderation always produces one of those
- * three outcomes with the same shape (see `@reviews/contracts`'s events.ts).
- *
- * Typed as `Record<EventType, ZodTypeAny>` so the mapping is exhaustive at
- * compile time: adding a new `EventType` without adding its schema here is
- * a TypeScript error, not a gap `writeOutboxEvent` would only discover the
- * first time someone calls it with the new type.
- */
-const PAYLOAD_SCHEMAS: Record<EventType, ZodTypeAny> = {
-  [EVENT_TYPES.REVIEW_SUBMITTED]: reviewSubmittedPayloadSchema,
-  [EVENT_TYPES.REVIEW_APPROVED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_REJECTED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_FLAGGED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_UNPUBLISHED]: reviewUnpublishedPayloadSchema,
-};
 
 export interface WriteOutboxEventInput {
   eventType: EventType;
@@ -81,7 +55,7 @@ export class OutboxValidationError extends Error {
  * fails the schema matching whatever type *was* given.
  */
 export async function writeOutboxEvent(tx: Prisma.TransactionClient, event: WriteOutboxEventInput): Promise<void> {
-  const payloadSchema: ZodTypeAny | undefined = PAYLOAD_SCHEMAS[event.eventType];
+  const payloadSchema: ZodTypeAny | undefined = eventPayloadSchemas[event.eventType];
   if (!payloadSchema) {
     throw new OutboxValidationError(`writeOutboxEvent: unknown event type "${String(event.eventType)}"`);
   }

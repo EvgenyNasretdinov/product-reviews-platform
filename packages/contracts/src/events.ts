@@ -95,3 +95,70 @@ export const reviewUnpublishedPayloadSchema = z
   })
   .strict();
 export type ReviewUnpublishedPayload = z.infer<typeof reviewUnpublishedPayloadSchema>;
+
+/**
+ * Maps every domain event type to the Zod schema its business payload must
+ * satisfy — the one canonical copy. Before this, `@reviews/db`'s
+ * `writeOutboxEvent`, the worker's outbox relay, and the worker's consumer
+ * plumbing each carried their own hand-copy of this same map, with a
+ * comment on each explaining why it was duplicated rather than shared.
+ * That was a maintenance cost, not a correctness one — all three were
+ * typed `Record<EventType, ZodTypeAny>`, so a new `EventType` missing from
+ * any one of them was already a compile error in that package, not a
+ * silent gap — but three copies of the same mapping is still three places
+ * that can drift out of sync in everything except that one checked
+ * property. `@reviews/contracts` is the layer every one of those packages
+ * already depends on, so this is the one place all three can import from
+ * without creating a new or backwards dependency.
+ *
+ * `REVIEW_APPROVED`, `REVIEW_REJECTED`, and `REVIEW_FLAGGED` share
+ * `reviewModeratedPayloadSchema` — moderation always produces one of those
+ * three outcomes with the same shape.
+ *
+ * `as const satisfies Record<EventType, z.ZodTypeAny>` (rather than a plain
+ * `: Record<EventType, z.ZodTypeAny>` annotation) is deliberate: annotating
+ * the constant with that type would widen every value to the bare
+ * `ZodTypeAny`, which is exactly what {@link EventEnvelope} below needs
+ * *not* to happen — it depends on each entry keeping its own specific
+ * schema type so the derived union has one member per event type instead
+ * of collapsing into one. `satisfies` still checks the same exhaustiveness
+ * (every `EventType` present, nothing extra) without that widening.
+ */
+export const eventPayloadSchemas = {
+  [EVENT_TYPES.REVIEW_SUBMITTED]: reviewSubmittedPayloadSchema,
+  [EVENT_TYPES.REVIEW_APPROVED]: reviewModeratedPayloadSchema,
+  [EVENT_TYPES.REVIEW_REJECTED]: reviewModeratedPayloadSchema,
+  [EVENT_TYPES.REVIEW_FLAGGED]: reviewModeratedPayloadSchema,
+  [EVENT_TYPES.REVIEW_UNPUBLISHED]: reviewUnpublishedPayloadSchema,
+} as const satisfies Record<EventType, z.ZodTypeAny>;
+
+/**
+ * The full envelope shape for every event type this system produces or
+ * consumes — one member per key of {@link eventPayloadSchemas}, derived
+ * from that map rather than hand-written as a union. A hand-written union
+ * is a second place that has to be kept in sync with the map by a human
+ * remembering to; forgetting was previously silent here specifically,
+ * since every caller that narrows a parsed envelope down to one event
+ * type does it with an `as EventEnvelope` cast (there is no schema-level
+ * discriminant on `eventType` alone — see `eventEnvelopeSchema`'s doc
+ * comment), so a union missing a variant would not fail to compile at
+ * either call site. Deriving it instead closes that gap structurally: a
+ * new entry in `eventPayloadSchemas` is automatically a new member here,
+ * with nothing left to remember.
+ */
+// `eventEnvelopeSchema` is called here exactly once, with the broad
+// `z.ZodTypeAny` rather than once per event type, specifically to sidestep
+// a TypeScript limitation: a generic function's return type, instantiated
+// per member inside a mapped type (`eventEnvelopeSchema<(typeof
+// eventPayloadSchemas)[K]>`), does not distribute the way a plain indexed
+// access does -- it resolves `(typeof eventPayloadSchemas)[K]` against K's
+// *constraint* (the union of every payload schema) rather than each
+// member in turn, collapsing every branch to the same (wrong) type.
+// Calling it once for the shared envelope shape and varying only
+// `payload` per key below avoids relying on that distribution at all.
+type EnvelopeFields = Omit<z.infer<ReturnType<typeof eventEnvelopeSchema<z.ZodTypeAny>>>, 'payload'>;
+
+type EventEnvelopeByType = {
+  [K in keyof typeof eventPayloadSchemas]: EnvelopeFields & { payload: z.infer<(typeof eventPayloadSchemas)[K]> };
+};
+export type EventEnvelope = EventEnvelopeByType[keyof EventEnvelopeByType];

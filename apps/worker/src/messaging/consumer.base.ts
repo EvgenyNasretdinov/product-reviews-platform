@@ -1,35 +1,7 @@
-import {
-  EVENT_TYPES,
-  eventEnvelopeSchema,
-  eventTypeSchema,
-  reviewModeratedPayloadSchema,
-  reviewSubmittedPayloadSchema,
-  reviewUnpublishedPayloadSchema,
-  type EventType,
-} from '@reviews/contracts';
+import { eventEnvelopeSchema, eventPayloadSchemas, eventTypeSchema } from '@reviews/contracts';
 import { Logger } from '@nestjs/common';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
-import type { ZodTypeAny } from 'zod';
 import type { EventEnvelope } from './event.publisher.js';
-
-/**
- * Maps every domain event type to the Zod schema its business payload must
- * satisfy. Deliberately its own copy rather than an import from
- * `../relay/outbox.repository.ts` (which needs the identical map for the
- * publish direction) — the same reasoning that module gives for duplicating
- * this out of `@reviews/db` in the first place: `messaging/` is the lower
- * layer both `relay/` and every consumer sit on top of, so this file
- * importing *from* `relay/` would point the dependency the wrong way. Kept
- * in lockstep with both other copies by hand; `@reviews/contracts` remains
- * the one place that actually defines the shapes all three check against.
- */
-const PAYLOAD_SCHEMAS: Record<EventType, ZodTypeAny> = {
-  [EVENT_TYPES.REVIEW_SUBMITTED]: reviewSubmittedPayloadSchema,
-  [EVENT_TYPES.REVIEW_APPROVED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_REJECTED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_FLAGGED]: reviewModeratedPayloadSchema,
-  [EVENT_TYPES.REVIEW_UNPUBLISHED]: reviewUnpublishedPayloadSchema,
-};
 
 /** How many unacknowledged deliveries the broker may have in flight per consumer at once. */
 const PREFETCH = 10;
@@ -64,13 +36,13 @@ function parseEnvelope(raw: Buffer): EventEnvelope {
     throw new Error('message has no recognised eventType');
   }
 
-  const schema = PAYLOAD_SCHEMAS[typeResult.data];
+  const schema = eventPayloadSchemas[typeResult.data];
   const parsed = eventEnvelopeSchema(schema).safeParse(value);
   if (!parsed.success) {
     throw new Error(`message failed validation for eventType "${typeResult.data}": ${parsed.error.message}`);
   }
 
-  return parsed.data as EventEnvelope;
+  return parsed.data;
 }
 
 /**

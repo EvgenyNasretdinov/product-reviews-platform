@@ -1,25 +1,28 @@
-import {
-  eventEnvelopeSchema,
-  reviewModeratedPayloadSchema,
-  reviewSubmittedPayloadSchema,
-  reviewUnpublishedPayloadSchema,
-} from '@reviews/contracts';
+import type { EventEnvelope } from '@reviews/contracts';
 import { Injectable } from '@nestjs/common';
 import type { ConfirmChannel } from 'amqplib';
-import type { z } from 'zod';
 import { TOPOLOGY } from './topology.js';
 
 /**
- * The full envelope shape this worker publishes — the union of the three
- * envelope shapes `@reviews/contracts` defines (one per payload schema),
- * not a separate hand-rolled type: this way an envelope whose payload
- * doesn't match its own `eventType` is a compile error here too, not just
- * a runtime one inside `writeOutboxEvent`.
+ * The full envelope shape this worker publishes — re-exported from
+ * `@reviews/contracts`, where it is derived from `eventPayloadSchemas`
+ * (one member per event type) rather than hand-written here as a union.
+ * Kept re-exported from this module, rather than switching every call
+ * site to import it from `@reviews/contracts` directly, so `EventPublisher`
+ * and everything downstream of it (the relay, both consumers, the test
+ * harness) keep one stable import path for "the envelope type the
+ * messaging layer works with".
+ *
+ * Note this type is *not* a compile-time guarantee that a given
+ * envelope's `payload` matches its own `eventType` — nothing in this
+ * codebase narrows `EventEnvelope` by `eventType` at the type level (there
+ * is no discriminant field), so every place that needs one specific
+ * variant (`parseEnvelope` in both the relay and `messaging/consumer.base.ts`)
+ * gets there with an `as EventEnvelope` cast after a runtime Zod parse,
+ * not a type guard. The parse is what actually enforces the shape; this
+ * type only describes it.
  */
-export type EventEnvelope =
-  | z.infer<ReturnType<typeof eventEnvelopeSchema<typeof reviewSubmittedPayloadSchema>>>
-  | z.infer<ReturnType<typeof eventEnvelopeSchema<typeof reviewModeratedPayloadSchema>>>
-  | z.infer<ReturnType<typeof eventEnvelopeSchema<typeof reviewUnpublishedPayloadSchema>>>;
+export type { EventEnvelope };
 
 /**
  * A source of the current live confirm channel. `AmqpConnection` satisfies
