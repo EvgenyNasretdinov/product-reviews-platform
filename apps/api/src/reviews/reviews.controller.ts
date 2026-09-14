@@ -2,15 +2,17 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
-import { createReviewInputSchema, reviewSortSchema, type ReviewDto } from '@reviews/contracts';
+import { createReviewInputSchema, reviewSortSchema, updateReviewInputSchema, type ReviewDto } from '@reviews/contracts';
 import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
 import { Public } from '../auth/decorators/public.decorator.js';
@@ -89,5 +91,77 @@ export class ReviewsController {
     }
 
     return this.reviewsService.submit({ productId, authorId: user.id, input: parsed.data });
+  }
+}
+
+/**
+ * The author-management routes for a single review, addressed by its own
+ * id rather than nested under its product — unlike `ReviewsController`
+ * above, which is scoped `products/:productId/reviews` for the
+ * list/submit routes. No `@Public()` here: both handlers require
+ * authentication, enforced by the global `JwtAuthGuard`.
+ *
+ * `id` is parsed through `ParseUUIDPipe` on both handlers — the same
+ * reasoning as `VotesController`'s `reviewId`: it reaches a raw `::uuid`
+ * cast inside `ReviewsRepository`'s `lockReviewRow`, and a syntactically
+ * invalid uuid would otherwise fall through the global exception filter as
+ * an unmapped Postgres error (500) instead of the 400 a malformed
+ * client-supplied id actually warrants.
+ */
+@Controller('reviews')
+export class ReviewManagementController {
+  constructor(private readonly reviewsService: ReviewsService) {}
+
+  /**
+   * The body is parsed through the shared `updateReviewInputSchema` rather
+   * than a class-validator DTO — the same reason `submit` above parses
+   * `@Body() body: unknown` through `createReviewInputSchema`.
+   *
+   * `200`, not `202`: unlike a fresh submission, an edit's outcome (patched
+   * fields, and — for a previously `APPROVED` review — the drop back to
+   * `PENDING`) is already reflected in the body this handler returns.
+   */
+  @Patch(':id')
+  @HttpCode(HttpStatus.OK)
+  async update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<ReviewDto> {
+    const parsed = updateReviewInputSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+
+    return this.reviewsService.update(id, user.id, parsed.data);
+  }
+
+  /**
+   * `204` on success — the author, or any `MODERATOR` (see
+   * `ReviewsRepository.remove`'s doc comment for why a moderator may
+   * delete but never edit). No role guard/decorator here: the author/
+   * moderator distinction is made inside the service+repository, against
+   * the row's own `authorId`, not against static route metadata.
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthenticatedUser): Promise<void> {
+    await this.reviewsService.remove(id, user.id, user.role);
+  }
+}
+
+/**
+ * `GET /me/reviews` — the caller's own reviews, in every status. Deliberately
+ * a separate controller from `ReviewManagementController`: `@Controller`
+ * only takes one path prefix, and `me/reviews` doesn't nest under `reviews`
+ * the way `:id` does.
+ */
+@Controller('me/reviews')
+export class MyReviewsController {
+  constructor(private readonly reviewsService: ReviewsService) {}
+
+  @Get()
+  async listMine(@CurrentUser() user: AuthenticatedUser): Promise<ReviewDto[]> {
+    return this.reviewsService.listMine(user.id);
   }
 }

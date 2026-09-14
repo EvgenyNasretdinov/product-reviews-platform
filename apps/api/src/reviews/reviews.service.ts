@@ -1,12 +1,22 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { paginatedSchema, reviewDtoSchema, type CreateReviewInput, type ReviewDto, type ReviewSort } from '@reviews/contracts';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  paginatedSchema,
+  reviewDtoSchema,
+  type CreateReviewInput,
+  type ReviewDto,
+  type ReviewSort,
+  type UpdateReviewInput,
+} from '@reviews/contracts';
+import type { Role } from '@reviews/db';
 import type { z } from 'zod';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toPublicReviewDto, toReviewDto } from './reviews.mapper.js';
 import {
   cursorKeyFor,
   isUniqueReviewViolation,
+  NotReviewAuthorError,
   ProductNotFoundError,
+  ReviewNotFoundError,
   ReviewsRepository,
 } from './reviews.repository.js';
 
@@ -107,6 +117,62 @@ export class ReviewsService {
 
       throw error;
     }
+  }
+
+  /**
+   * Applies the author's patch — translates what `ReviewsRepository.update`
+   * throws into the right HTTP response, the same split `submit` uses for
+   * `ProductNotFoundError`. See that repository method's doc comment for
+   * the transaction it runs and the event ordering it guarantees.
+   */
+  async update(reviewId: string, authorId: string, input: UpdateReviewInput): Promise<ReviewDto> {
+    try {
+      const review = await this.repository.update(reviewId, authorId, input);
+      return toReviewDto(review);
+    } catch (error) {
+      if (error instanceof ReviewNotFoundError) {
+        throw new NotFoundException('Review not found');
+      }
+      if (error instanceof NotReviewAuthorError) {
+        // Deliberately the same 403 whether the caller is another customer
+        // or a moderator — see NotReviewAuthorError's doc comment: editing
+        // is author-only, with no role-based exception.
+        throw new ForbiddenException('You may only edit your own review');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Deletes `reviewId` on behalf of `callerId`/`callerRole` — the author, or
+   * any `MODERATOR`. See `ReviewsRepository.remove`'s doc comment for why
+   * this is a hard delete and what its lone outbox event carries.
+   */
+  async remove(reviewId: string, callerId: string, callerRole: Role): Promise<void> {
+    try {
+      await this.repository.remove(reviewId, callerId, callerRole);
+    } catch (error) {
+      if (error instanceof ReviewNotFoundError) {
+        throw new NotFoundException('Review not found');
+      }
+      if (error instanceof NotReviewAuthorError) {
+        throw new ForbiddenException('You may only delete your own review');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Every review `authorId` has authored, in every status, including
+   * `moderationReason` on rejected ones — the backing call for
+   * `GET /me/reviews`. Uses `toReviewDto`, never `toPublicReviewDto`: this
+   * is the one path where a caller is entitled to see their own
+   * `moderationReason`, unlike the public `list` above, which always nulls
+   * it. See reviews.mapper.ts for that contrast.
+   */
+  async listMine(authorId: string): Promise<ReviewDto[]> {
+    const rows = await this.repository.listByAuthor(authorId);
+    return rows.map(toReviewDto);
   }
 }
 

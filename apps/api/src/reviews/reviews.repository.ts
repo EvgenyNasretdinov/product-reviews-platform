@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { EVENT_TYPES, type ReviewSort, type VoteValue } from '@reviews/contracts';
-import { Prisma, writeOutboxEvent, type Review, type ReviewStatus } from '@reviews/db';
+import { Prisma, writeOutboxEvent, type Review, type ReviewStatus, type Role } from '@reviews/db';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
 /** A review row joined with the author fields the DTO exposes. */
@@ -188,6 +188,47 @@ export class SelfVoteError extends Error {
     super(`User cannot vote on their own review ${reviewId}`);
     this.name = 'SelfVoteError';
   }
+}
+
+/**
+ * Thrown from inside {@link ReviewsRepository.update} and
+ * {@link ReviewsRepository.remove} when `reviewId` doesn't match any row.
+ * Deliberately a plain `Error`, not a `NotFoundException` — see
+ * `ProductNotFoundError`'s doc comment for why this layer never throws a
+ * NestJS type.
+ */
+export class ReviewNotFoundError extends Error {
+  constructor(public readonly reviewId: string) {
+    super(`Review ${reviewId} not found`);
+    this.name = 'ReviewNotFoundError';
+  }
+}
+
+/**
+ * Thrown from inside {@link ReviewsRepository.update} when the caller isn't
+ * the review's author, and from {@link ReviewsRepository.remove} when the
+ * caller is neither the author nor a `MODERATOR`.
+ *
+ * `update` has no role escape hatch at all — it compares `authorId` against
+ * the caller and stops there, full stop, regardless of what role the caller
+ * holds. That is deliberate: rewriting a customer's words is not a
+ * moderation decision (unlike deleting one, which `remove` does allow a
+ * `MODERATOR` to do), so a moderator hitting this error is not an accident
+ * of the ownership check being reused for both endpoints — there is no
+ * separate role branch in `update` that a future change could widen by
+ * mistake.
+ */
+export class NotReviewAuthorError extends Error {
+  constructor(public readonly reviewId: string) {
+    super(`User is not the author of review ${reviewId}`);
+    this.name = 'NotReviewAuthorError';
+  }
+}
+
+export interface UpdateReviewPatch {
+  rating?: number;
+  title?: string;
+  body?: string;
 }
 
 /**
@@ -382,28 +423,161 @@ export class ReviewsRepository {
       await recomputeVoteCounts(tx, reviewId);
     });
   }
+
+  /**
+   * Applies `authorId`'s patch to `reviewId` in one transaction: locks the
+   * row first (see {@link lockReviewRow}), rejects unless `authorId` is the
+   * review's own author (see {@link NotReviewAuthorError}'s doc comment for
+   * why there is no role-based bypass here), then always returns the review
+   * to `PENDING` — an edit is a resubmission for moderation, whatever its
+   * previous status was — clearing `publishedAt` and the now-stale
+   * `moderationReason`.
+   *
+   * If the locked row was `APPROVED`, a `review.unpublished` event is
+   * written *before* the patch is applied and `review.submitted` is
+   * written, in that order. Both events land in this same transaction, but
+   * the ordering between them is still what the brief calls load-bearing:
+   * a consumer recomputing a product's rating from approved reviews reads
+   * the outbox in row-id order, and `writeOutboxEvent`'s ids are
+   * monotonic within one transaction (see its own doc comment on
+   * `eventId`/insert order), so writing `REVIEW_UNPUBLISHED` first is what
+   * guarantees the removal is visible to that consumer no later than the
+   * resubmission — never a window where the old, no-longer-displayed text
+   * is still counted. See test/review-management.integration.test.ts's
+   * "unpublishes and resubmits when an approved review is edited".
+   *
+   * A row that was `PENDING`, `REJECTED`, or `FLAGGED` was never on public
+   * display, so no `review.unpublished` fires for those — only the
+   * `review.submitted` resubmission.
+   */
+  async update(reviewId: string, authorId: string, patch: UpdateReviewPatch): Promise<ReviewWithAuthor> {
+    return this.prisma.$transaction(async (tx) => {
+      const locked = await lockReviewRow(tx, reviewId);
+      if (!locked) {
+        throw new ReviewNotFoundError(reviewId);
+      }
+      if (locked.authorId !== authorId) {
+        throw new NotReviewAuthorError(reviewId);
+      }
+
+      if (locked.status === 'APPROVED') {
+        await writeOutboxEvent(tx, {
+          eventType: EVENT_TYPES.REVIEW_UNPUBLISHED,
+          aggregateId: reviewId,
+          payload: { reviewId, productId: locked.productId },
+        });
+      }
+
+      const updated = await tx.review.update({
+        where: { id: reviewId },
+        data: {
+          rating: patch.rating,
+          title: patch.title,
+          body: patch.body,
+          status: 'PENDING',
+          publishedAt: null,
+          moderationReason: null,
+        },
+        include: { author: { select: { id: true, displayName: true } } },
+      });
+
+      await writeOutboxEvent(tx, {
+        eventType: EVENT_TYPES.REVIEW_SUBMITTED,
+        aggregateId: reviewId,
+        payload: {
+          reviewId,
+          productId: locked.productId,
+          authorId,
+          rating: updated.rating,
+          title: updated.title,
+          body: updated.body,
+          verifiedPurchase: updated.verifiedPurchase,
+        },
+      });
+
+      return updated;
+    });
+  }
+
+  /**
+   * Hard-deletes `reviewId` in one transaction: locks the row first,
+   * rejects unless `callerId` is the author or `callerRole` is
+   * `MODERATOR`, deletes it — `review_votes` rows cascade via the FK's
+   * `onDelete: Cascade` (see schema.prisma), so no separate vote cleanup is
+   * needed here — and records `review.unpublished`.
+   *
+   * The event payload carries only `reviewId`/`productId`
+   * (`reviewUnpublishedPayloadSchema`'s full shape): the row is gone by the
+   * time the projection consumes this event, so there is nothing left to
+   * read a rating/title/body off of, and the projection recomputes the
+   * product's rating from source (the surviving `APPROVED` reviews) rather
+   * than needing this payload to carry more.
+   *
+   * Retaining a moderation audit trail after deletion would argue for a
+   * soft delete instead (a `deletedAt` column and a filter everywhere else
+   * already assumes "row exists" means "not deleted") — noted as a
+   * possible future direction, not implemented here.
+   */
+  async remove(reviewId: string, callerId: string, callerRole: Role): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const locked = await lockReviewRow(tx, reviewId);
+      if (!locked) {
+        throw new ReviewNotFoundError(reviewId);
+      }
+      if (locked.authorId !== callerId && callerRole !== 'MODERATOR') {
+        throw new NotReviewAuthorError(reviewId);
+      }
+
+      await tx.review.delete({ where: { id: reviewId } });
+
+      await writeOutboxEvent(tx, {
+        eventType: EVENT_TYPES.REVIEW_UNPUBLISHED,
+        aggregateId: reviewId,
+        payload: { reviewId, productId: locked.productId },
+      });
+    });
+  }
+
+  /**
+   * Every review `authorId` has written, in every status, newest first —
+   * the backing query for `GET /me/reviews`. No `productId` filter and no
+   * `status: 'APPROVED'` filter: unlike {@link listApproved}, this is the
+   * author reading their own work, so a `PENDING`/`REJECTED`/`FLAGGED` row
+   * (and, on a rejected one, its `moderationReason`) is exactly what should
+   * come back — see reviews.mapper.ts's `toReviewDto` vs `toPublicReviewDto`
+   * for the two paths this deliberately keeps apart.
+   */
+  async listByAuthor(authorId: string): Promise<ReviewWithAuthor[]> {
+    return this.prisma.review.findMany({
+      where: { authorId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: { author: { select: { id: true, displayName: true } } },
+    });
+  }
 }
 
 /** The `reviews` fields {@link lockReviewRow} reads from behind its lock. */
 interface LockedReview {
   authorId: string;
+  productId: string;
   status: ReviewStatus;
 }
 
 /**
  * Takes an exclusive row lock on `reviews` for `reviewId` and, in that same
- * statement, reads back its author and status — as its own leading
- * statement, before either {@link ReviewsRepository.castVote} or
- * {@link ReviewsRepository.removeVote} writes to `review_votes`. Returns
- * `null` if `reviewId` doesn't match any row.
+ * statement, reads back its author, product, and status — as its own
+ * leading statement, before {@link ReviewsRepository.castVote},
+ * {@link ReviewsRepository.removeVote}, {@link ReviewsRepository.update}, or
+ * {@link ReviewsRepository.remove} writes anywhere else. Returns `null` if
+ * `reviewId` doesn't match any row.
  *
- * Reading `author_id`/`status` here rather than via a separate `findUnique`
- * costs nothing extra — same statement, same round trip — and is what lets
- * `castVote` make its APPROVED/self-vote checks against a row it already
- * holds the lock on, closing the race a preceding unlocked read would leave
- * open against a concurrent moderation decision. Also used by `removeVote`,
- * which locks the row but has no checks of its own to make, so it discards
- * the return value.
+ * Reading `author_id`/`product_id`/`status` here rather than via a separate
+ * `findUnique` costs nothing extra — same statement, same round trip — and
+ * is what lets `castVote` make its APPROVED/self-vote checks (and `update`/
+ * `remove` their author/moderator checks) against a row they already hold
+ * the lock on, closing the race a preceding unlocked read would leave open
+ * against a concurrent moderation decision. `removeVote` also calls this
+ * but has no checks of its own to make, so it discards the return value.
  *
  * Lock mode is `FOR UPDATE`, not the weaker `FOR NO KEY UPDATE` that would
  * also suffice for mutual exclusion among voters (self-conflicting, same as
@@ -445,11 +619,11 @@ interface LockedReview {
  * relied on by `removeVote`, which never checks the review exists first.
  */
 async function lockReviewRow(tx: Prisma.TransactionClient, reviewId: string): Promise<LockedReview | null> {
-  const rows = await tx.$queryRaw<Array<{ author_id: string; status: ReviewStatus }>>`
-    SELECT author_id, status FROM reviews WHERE id = ${reviewId}::uuid FOR UPDATE
+  const rows = await tx.$queryRaw<Array<{ author_id: string; product_id: string; status: ReviewStatus }>>`
+    SELECT author_id, product_id, status FROM reviews WHERE id = ${reviewId}::uuid FOR UPDATE
   `;
   const row = rows[0];
-  return row ? { authorId: row.author_id, status: row.status } : null;
+  return row ? { authorId: row.author_id, productId: row.product_id, status: row.status } : null;
 }
 
 /**
