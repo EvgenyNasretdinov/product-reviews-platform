@@ -1,9 +1,9 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { paginatedSchema, reviewDtoSchema, type ModerationDecisionInput, type ReviewDto, type ReviewStatus } from '@reviews/contracts';
 import type { z } from 'zod';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toReviewDto } from '../reviews/reviews.mapper.js';
-import { cursorKeyFor, ReviewNotAwaitingModerationError, ReviewsRepository } from '../reviews/reviews.repository.js';
+import { cursorKeyFor, ReviewNotAwaitingModerationError, ReviewNotFoundError, ReviewsRepository } from '../reviews/reviews.repository.js';
 
 /** The cursor scope for the moderation queue — see cursor.ts for why a cursor is scoped at all. */
 const CURSOR_SCOPE = 'moderation-queue';
@@ -60,7 +60,11 @@ export class ModerationService {
    * Translates `ReviewNotAwaitingModerationError` into 409 — the review was
    * already decided, whether by an earlier call from this same moderator, a
    * different one, or (eventually) the automatic classifier this endpoint
-   * exists to back up.
+   * exists to back up — and `ReviewNotFoundError` into 404 for a reviewId
+   * that never matched any row. The repository tells these two apart
+   * itself (see `ReviewsRepository.decide`'s doc comment); this method just
+   * maps each to the response its own name promises, rather than folding
+   * both into the same 409 the way a bare `updateMany.count === 0` would.
    */
   async decide(reviewId: string, input: ModerationDecisionInput): Promise<ReviewDto> {
     if (input.decision === 'REJECTED' && !input.reason) {
@@ -71,6 +75,9 @@ export class ModerationService {
       const review = await this.repository.decide({ reviewId, decision: input.decision, reason: input.reason });
       return toReviewDto(review);
     } catch (error) {
+      if (error instanceof ReviewNotFoundError) {
+        throw new NotFoundException('Review not found');
+      }
       if (error instanceof ReviewNotAwaitingModerationError) {
         throw new ConflictException('review is not awaiting moderation');
       }

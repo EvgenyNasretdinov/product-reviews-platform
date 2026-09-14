@@ -145,6 +145,17 @@ describe('POST /api/v1/moderation/reviews/:id', () => {
       .expect(401);
   });
 
+  // 404 vs 409: a reviewId that never matched any row must not be folded
+  // into the same "not awaiting moderation" 409 a real, already-decided
+  // review gets — see ReviewsRepository.decide's doc comment for how the
+  // follow-up read on the zero-row branch tells the two apart.
+  it('returns 404 for a review id that does not exist', async () => {
+    const modToken = await loginAsModerator('mod-404@example.com');
+    const bogusId = '00000000-0000-4000-8000-000000000000';
+
+    await decide(bogusId, modToken, { decision: 'APPROVED', reason: null }).expect(404);
+  });
+
   // Case 5.
   it('approving a FLAGGED review publishes it and writes one review.approved event', async () => {
     const modToken = await ctx.loginAs('mod@example.com');

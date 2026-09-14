@@ -192,10 +192,11 @@ export class SelfVoteError extends Error {
 
 /**
  * Thrown from inside {@link ReviewsRepository.update} and
- * {@link ReviewsRepository.remove} when `reviewId` doesn't match any row.
- * Deliberately a plain `Error`, not a `NotFoundException` — see
- * `ProductNotFoundError`'s doc comment for why this layer never throws a
- * NestJS type.
+ * {@link ReviewsRepository.remove} when `reviewId` doesn't match any row,
+ * and from {@link ReviewsRepository.decide}'s zero-row follow-up read for
+ * the same reason. Deliberately a plain `Error`, not a `NotFoundException`
+ * — see `ProductNotFoundError`'s doc comment for why this layer never
+ * throws a NestJS type.
  */
 export class ReviewNotFoundError extends Error {
   constructor(public readonly reviewId: string) {
@@ -653,6 +654,12 @@ export class ReviewsRepository {
    * called, so the transaction rolls back with no event and no state
    * change, matching the "409, no outbox row" case load-bearing to this
    * task.
+   *
+   * `updated.count === 0` alone doesn't say *why* nothing matched — see the
+   * follow-up read inside that branch below, which turns that single count
+   * into the right one of {@link ReviewNotFoundError} (404: no such review)
+   * or {@link ReviewNotAwaitingModerationError} (409: it exists, already
+   * decided).
    */
   async decide(params: DecideModerationParams): Promise<ReviewWithAuthor> {
     const { reviewId, decision, reason } = params;
@@ -667,6 +674,21 @@ export class ReviewsRepository {
         },
       });
       if (updated.count === 0) {
+        // `updateMany` matching zero rows means one of two different things
+        // — a nonexistent reviewId, or one that exists but isn't
+        // PENDING/FLAGGED — and the predicated `updateMany` above can't
+        // itself tell them apart; it only reports a count. This follow-up
+        // read runs *after* the write has already been decided (the
+        // transaction has nothing left to commit on this path), so it
+        // cannot reopen the race the predicate above closes: no concurrent
+        // writer can turn a "row exists" read back into "row doesn't
+        // exist" or vice versa in a way that changes which error is
+        // correct to raise here. It exists purely to pick the right error
+        // message, not to guard the write.
+        const exists = await tx.review.findUnique({ where: { id: reviewId }, select: { id: true } });
+        if (!exists) {
+          throw new ReviewNotFoundError(reviewId);
+        }
         throw new ReviewNotAwaitingModerationError(reviewId);
       }
 

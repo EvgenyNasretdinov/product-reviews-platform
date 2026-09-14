@@ -59,11 +59,11 @@ describe('GET /docs-json', () => {
     }
   });
 
-  it('documents 202, 400, 401, 409, and 429 for the review-submission operation', async () => {
+  it('documents 202, 400, 401, 404, 409, and 429 for the review-submission operation', async () => {
     const res = await ctx.request.get('/docs-json').expect(200);
     const body = res.body as MinimalOpenApiDoc;
     const submitOperation = body.paths['/api/v1/products/{productId}/reviews']?.post;
-    expect(submitOperation && Object.keys(submitOperation.responses).sort()).toEqual(['202', '400', '401', '409', '429']);
+    expect(submitOperation && Object.keys(submitOperation.responses).sort()).toEqual(['202', '400', '401', '404', '409', '429']);
   });
 
   it('declares bearer auth so protected routes can be tried from the UI', async () => {

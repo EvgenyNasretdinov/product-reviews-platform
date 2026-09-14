@@ -20,7 +20,7 @@ import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-
 import { Public } from '../auth/decorators/public.decorator.js';
 import { ErrorResponseDto } from '../common/openapi/error-response.dto.js';
 import { ReviewSubmitThrottlerGuard } from '../common/throttle/throttle.module.js';
-import { CreateReviewRequestDto, ReviewListResponseDto, ReviewResponseDto, UpdateReviewRequestDto } from './dto/reviews.dto.js';
+import { CreateReviewRequestDto, ReviewConflictResponseDto, ReviewListResponseDto, ReviewResponseDto, UpdateReviewRequestDto } from './dto/reviews.dto.js';
 import { ReviewsService, type ListReviewsResult } from './reviews.service.js';
 
 /**
@@ -112,7 +112,8 @@ export class ReviewsController {
   @ApiResponse({ status: 202, type: ReviewResponseDto, description: 'Accepted: the review is PENDING until moderation publishes it.' })
   @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid rating/title/body or malformed productId.' })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
-  @ApiResponse({ status: 409, type: ErrorResponseDto, description: 'The caller has already submitted a review for this product.' })
+  @ApiResponse({ status: 404, type: ErrorResponseDto, description: 'No product has this productId.' })
+  @ApiResponse({ status: 409, type: ReviewConflictResponseDto, description: 'The caller has already submitted a review for this product; `reviewId` points at it.' })
   @ApiResponse({ status: 429, type: ErrorResponseDto, description: 'Review-submission rate limit exceeded for this caller.' })
   async submit(
     @Param('productId', ParseUUIDPipe) productId: string,
