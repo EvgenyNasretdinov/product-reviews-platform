@@ -35,6 +35,7 @@ const SAMPLE_PAYLOADS = {
       productId: randomUUID(),
       status: 'APPROVED' as const,
       moderationReason: null,
+      decidedBy: 'MODERATOR' as const,
       moderatorId: randomUUID(),
     },
   },

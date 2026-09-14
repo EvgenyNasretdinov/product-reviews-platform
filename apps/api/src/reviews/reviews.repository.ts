@@ -711,7 +711,14 @@ export class ReviewsRepository {
       await writeOutboxEvent(tx, {
         eventType: decision === 'APPROVED' ? EVENT_TYPES.REVIEW_APPROVED : EVENT_TYPES.REVIEW_REJECTED,
         aggregateId: reviewId,
-        payload: { reviewId, productId: review.productId, status: decision, moderationReason: reason, moderatorId },
+        payload: {
+          reviewId,
+          productId: review.productId,
+          status: decision,
+          moderationReason: reason,
+          decidedBy: 'MODERATOR',
+          moderatorId,
+        },
       });
 
       return review;

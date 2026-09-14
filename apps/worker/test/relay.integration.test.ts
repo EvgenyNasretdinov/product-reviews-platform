@@ -43,6 +43,7 @@ function buildPayload(eventType: EventType, reviewId: string): Prisma.InputJsonO
         productId: randomUUID(),
         status: eventType === EVENT_TYPES.REVIEW_APPROVED ? 'APPROVED' : eventType === EVENT_TYPES.REVIEW_REJECTED ? 'REJECTED' : 'FLAGGED',
         moderationReason: null,
+        decidedBy: 'MODERATOR',
         moderatorId: randomUUID(),
       };
     case EVENT_TYPES.REVIEW_SUBMITTED:

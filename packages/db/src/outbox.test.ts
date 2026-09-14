@@ -137,6 +137,7 @@ describe('writeOutboxEvent', () => {
         productId: '0193a6f0-0000-7000-8000-000000000003',
         status: 'APPROVED',
         moderationReason: null,
+        decidedBy: 'MODERATOR',
         moderatorId: '0193a6f0-0000-7000-8000-000000000005',
       },
     });

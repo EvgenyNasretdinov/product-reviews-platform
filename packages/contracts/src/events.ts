@@ -62,17 +62,30 @@ export const reviewModeratedPayloadSchema = z
     productId: z.string().uuid(),
     status: z.enum(['APPROVED', 'REJECTED', 'FLAGGED']),
     moderationReason: z.string().nullable(),
-    // The user who made the decision. With hard-delete-and-cascade on
-    // `reviews` (see ReviewsRepository.remove's doc comment), this event —
-    // not a column on the row, which may not outlive the decision — is the
-    // only durable record of who moderated what. Required, not nullable:
-    // `POST /moderation/reviews/:id` is MODERATOR-only, so a manual
-    // decision always has a real actor. An automatic classifier's FLAGGED
-    // event (a later plan) has no human actor yet; that gap is for
-    // whichever plan wires that path up to resolve, not solved here.
-    moderatorId: z.string().uuid(),
+    // Which *kind* of actor made this decision — a human moderator through
+    // `POST /moderation/reviews/:id`, or the automatic classifier consuming
+    // `review.submitted`. Needed alongside `moderatorId` rather than
+    // instead of it: a bare nullable `moderatorId` would make `null` mean
+    // both "the policy decided this" and "we forgot to record who did",
+    // and telling a human decision apart from an automatic one is exactly
+    // the question an audit trail exists to answer. A `'system'` sentinel
+    // inside a uuid field was rejected for the same reason in reverse — a
+    // type that lies about itself.
+    decidedBy: z.enum(['MODERATOR', 'AUTOMATIC']),
+    // The user who made the decision, when `decidedBy` is `'MODERATOR'`.
+    // With hard-delete-and-cascade on `reviews` (see
+    // ReviewsRepository.remove's doc comment), this event — not a column on
+    // the row, which may not outlive the decision — is the only durable
+    // record of who moderated what. Nullable because the automatic
+    // classifier has no human actor to record; the refine below is what
+    // keeps this field and `decidedBy` from ever disagreeing.
+    moderatorId: z.string().uuid().nullable(),
   })
-  .strict();
+  .strict()
+  .refine((payload) => (payload.decidedBy === 'MODERATOR' ? payload.moderatorId !== null : payload.moderatorId === null), {
+    message: 'moderatorId must be set exactly when decidedBy is MODERATOR, and null when AUTOMATIC',
+    path: ['moderatorId'],
+  });
 export type ReviewModeratedPayload = z.infer<typeof reviewModeratedPayloadSchema>;
 
 export const reviewUnpublishedPayloadSchema = z
