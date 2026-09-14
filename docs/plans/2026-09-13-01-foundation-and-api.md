@@ -1503,9 +1503,15 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-One transaction per vote: `upsert` the `review_votes` row, then recompute both counters from that table in a single statement rather than incrementing:
+One transaction per vote, and **the statement order is the whole correctness argument**. Take an exclusive lock on the review row as its own statement first, then write the vote, then recompute both counters from `review_votes`:
 
 ```sql
+-- 1. Lock the review row. Its own statement, before any write.
+SELECT author_id, status FROM reviews WHERE id = $1::uuid FOR UPDATE;
+
+-- 2. Upsert the review_votes row (Prisma upsert on the (review_id, user_id) key).
+
+-- 3. Recompute both counters. Never an increment.
 UPDATE reviews r SET
   helpful_count     = v.helpful,
   not_helpful_count = v.not_helpful
@@ -1513,12 +1519,20 @@ FROM (
   SELECT
     count(*) FILTER (WHERE value = 'HELPFUL')     AS helpful,
     count(*) FILTER (WHERE value = 'NOT_HELPFUL') AS not_helpful
-  FROM review_votes WHERE review_id = $1
+  FROM review_votes WHERE review_id = $1::uuid
 ) v
-WHERE r.id = $1
+WHERE r.id = $1::uuid;
 ```
 
-Recomputing inside the transaction is what makes case 8 pass: concurrent transactions serialise on the review row, and each recount sees a consistent snapshot of the votes. An `increment` would read a stale value and lose updates under the same load.
+**Why the leading lock is not redundant.** Doing steps 2 and 3 without step 1 fails under READ COMMITTED, and it fails silently. A statement takes its snapshot at statement start. When ten voters run step 3 concurrently, each blocks on the review row; on unblocking, Postgres re-evaluates the row it collided with but does **not** retake the snapshot, so the aggregate over `review_votes` still reads the pre-wait view. Every voter computes `1` and writes `1`. Serialising the *write* does not make the *read* in the same statement fresh — that is the trap.
+
+With the lock taken first as a separate statement, the recompute never blocks, so it takes a fresh snapshot that includes every vote committed before the lock was acquired.
+
+**Do not merge the lock into the `UPDATE`.** `UPDATE ... FOR UPDATE` is not a thing, and moving the lock later reintroduces the undercount exactly.
+
+`FOR UPDATE` is stronger than strictly needed — `FOR NO KEY UPDATE` self-conflicts, which is all that mutual exclusion among voters requires, and it would not block inserts into other tables holding a foreign key to `reviews`. `review_votes` is currently the only such table, so this costs nothing today; revisit if a second one appears.
+
+An `increment` is wrong for the original reason too: it reads a value a concurrent transaction has already changed, and loses updates under precisely the load that makes the count matter.
 
 - [ ] **Step 4: Run to verify it passes**
 
