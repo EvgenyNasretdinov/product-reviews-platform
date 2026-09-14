@@ -8,6 +8,14 @@ export interface WorkerHarness {
   readonly prisma: PrismaClient;
   readonly channel: ConfirmChannel;
   publish(envelope: EventEnvelope): Promise<void>;
+  /**
+   * Sends `content` straight to `queue`, bypassing the exchange and
+   * `EventPublisher` entirely — unlike `publish`, this can put a body on a
+   * queue that isn't a valid envelope at all, which is exactly what the
+   * "malformed message" consumer test needs: a real publisher, built on
+   * `@reviews/contracts`, can't produce a bad envelope to publish.
+   */
+  publishRaw(queue: string, content: unknown): Promise<void>;
   /** Resolves with the next message delivered to `queue`, acking it, or rejects after `timeoutMs`. */
   consumeOne(queue: string, timeoutMs: number): Promise<ConsumeMessage>;
   /**
@@ -44,6 +52,10 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
     prisma,
     channel,
     publish: (envelope) => publisher.publish(envelope),
+    publishRaw: (queue, content) => {
+      channel.sendToQueue(queue, Buffer.from(JSON.stringify(content)), { persistent: true });
+      return Promise.resolve();
+    },
     consumeOne: (queue, timeoutMs) => consumeOne(channel, queue, timeoutMs),
     consumeMany: (queue, count, timeoutMs = 5_000) => consumeMany(channel, queue, count, timeoutMs),
     async purgeAll() {
