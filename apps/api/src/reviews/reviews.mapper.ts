@@ -22,3 +22,18 @@ export function toReviewDto(row: ReviewWithAuthor): ReviewDto {
     moderationReason: row.moderationReason,
   };
 }
+
+/**
+ * Converts a `reviews` row for the *public* listing specifically.
+ * `moderationReason` is a moderator's private note about why a review
+ * needed attention, not something any visitor browsing a product's reviews
+ * should see — and an `APPROVED` review can still carry a leftover value
+ * from an earlier moderation pass (flagged, then cleared). Rather than
+ * trust `toReviewDto`'s straight column-to-field copy to be the right
+ * shape for a public response, this wrapper deliberately overwrites the
+ * field with `null` after delegating to it, so the omission is explicit
+ * and provable rather than incidental.
+ */
+export function toPublicReviewDto(row: ReviewWithAuthor): ReviewDto {
+  return { ...toReviewDto(row), moderationReason: null };
+}

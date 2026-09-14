@@ -1,11 +1,46 @@
-import { BadRequestException, Body, Controller, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
-import { createReviewInputSchema, type ReviewDto } from '@reviews/contracts';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import { createReviewInputSchema, reviewSortSchema, type ReviewDto } from '@reviews/contracts';
+import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
-import { ReviewsService } from './reviews.service.js';
+import { Public } from '../auth/decorators/public.decorator.js';
+import { ReviewsService, type ListReviewsResult } from './reviews.service.js';
+
+/**
+ * `sort`, `rating`, `cursor`, and `limit` are validated by hand through
+ * this schema rather than Nest's class-validator `ValidationPipe` — the
+ * same reason `ProductsController#list`'s `listProductsQuerySchema` is:
+ * the global pipe skips a plain-object query param with no class-validator
+ * metatype, so a bare `@Query() query: unknown` reaches the handler
+ * unvalidated otherwise.
+ */
+const listReviewsQuerySchema = z.object({
+  sort: reviewSortSchema,
+  rating: z.coerce.number().int().min(1).max(5).optional(),
+  cursor: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
 
 @Controller('products/:productId/reviews')
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
+
+  /**
+   * The public review list for one product — `APPROVED` reviews only.
+   * `@Public()` on this handler specifically, not the whole controller:
+   * `POST` below stays behind the global `JwtAuthGuard`, this `GET` opts
+   * out of it, the same way `ProductsController` does at the class level
+   * for a controller that is public end to end.
+   */
+  @Public()
+  @Get()
+  async list(@Param('productId') productId: string, @Query() query: unknown): Promise<ListReviewsResult> {
+    const parsed = listReviewsQuerySchema.safeParse(query);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join('; '));
+    }
+
+    return this.reviewsService.list({ productId, ...parsed.data });
+  }
 
   /**
    * The body is parsed through the shared `createReviewInputSchema` rather
