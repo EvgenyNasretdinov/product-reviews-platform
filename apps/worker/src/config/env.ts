@@ -7,7 +7,14 @@ export const envSchema = z.object({
   // Outbox relay tuning (Task 2). All three default so a bare RABBITMQ_URL +
   // DATABASE_URL is still enough to boot in development; production can
   // tighten them without a code change.
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+  //
+  // OUTBOX_BATCH_SIZE's default is capped by the relay's per-batch
+  // transaction timeout, not by throughput: the whole batch's publishes
+  // run inside one transaction (see outbox-relay.service.ts's `runOnce`),
+  // so a bigger batch needs a longer timeout budget, not the other way
+  // round. 20 comfortably fits that budget with room to spare — see
+  // PER_ROW_PUBLISH_BUDGET_MS/TRANSACTION_TIMEOUT_HEADROOM_MS.
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
 });

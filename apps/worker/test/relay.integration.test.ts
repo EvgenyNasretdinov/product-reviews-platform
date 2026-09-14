@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { EVENT_TYPES, type EventType } from '@reviews/contracts';
-import type { OutboxEvent, PrismaClient } from '@reviews/db';
+import type { OutboxEvent, Prisma, PrismaClient } from '@reviews/db';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EventPublisher } from '../src/messaging/event.publisher.js';
+import { EventPublisher, type EventEnvelope } from '../src/messaging/event.publisher.js';
 import { TOPOLOGY } from '../src/messaging/topology.js';
 import { OutboxRelayService, type OutboxRelayConfig } from '../src/relay/outbox-relay.service.js';
 import { OutboxRepository } from '../src/relay/outbox.repository.js';
 import { createWorkerHarness, type WorkerHarness } from './harness.js';
 
-const CONFIG: OutboxRelayConfig = { batchSize: 50, maxAttempts: 5, pollIntervalMs: 500 };
+const CONFIG: OutboxRelayConfig = { batchSize: 20, maxAttempts: 5, pollIntervalMs: 500 };
 
 /**
  * Maps an outbox row's own (autoincrement) id to a deterministic,
@@ -24,6 +24,42 @@ function idToReviewId(id: bigint): string {
 }
 
 /**
+ * A schema-valid business payload for `eventType`, keyed off the same
+ * per-type shapes `packages/contracts/src/events.ts` defines (`.strict()`
+ * schemas — an envelope with the wrong shape for its own `eventType`
+ * fails `OutboxRepository`'s validation, same as it would in production).
+ * `insertOutboxRow` needs this instead of one fixed shape because some
+ * tests below insert more than one event type for the same aggregate.
+ */
+function buildPayload(eventType: EventType, reviewId: string): Prisma.InputJsonObject {
+  switch (eventType) {
+    case EVENT_TYPES.REVIEW_UNPUBLISHED:
+      return { reviewId, productId: randomUUID() };
+    case EVENT_TYPES.REVIEW_APPROVED:
+    case EVENT_TYPES.REVIEW_REJECTED:
+    case EVENT_TYPES.REVIEW_FLAGGED:
+      return {
+        reviewId,
+        productId: randomUUID(),
+        status: eventType === EVENT_TYPES.REVIEW_APPROVED ? 'APPROVED' : eventType === EVENT_TYPES.REVIEW_REJECTED ? 'REJECTED' : 'FLAGGED',
+        moderationReason: null,
+        moderatorId: randomUUID(),
+      };
+    case EVENT_TYPES.REVIEW_SUBMITTED:
+    default:
+      return {
+        reviewId,
+        productId: randomUUID(),
+        authorId: randomUUID(),
+        rating: 5,
+        title: 'Great product',
+        body: 'Solid build quality and easy to use every day.',
+        verifiedPurchase: true,
+      };
+  }
+}
+
+/**
  * Inserts one outbox row whose `payload` column is the full envelope
  * shape `writeOutboxEvent` (`@reviews/db`) itself writes — verified
  * against that module during Task 1's review — with a `reviewId`
@@ -35,12 +71,12 @@ function idToReviewId(id: bigint): string {
 async function insertOutboxRow(
   prisma: PrismaClient,
   eventType: EventType,
-  overrides: { attempts?: number } = {},
+  overrides: { attempts?: number; aggregateId?: string } = {},
 ): Promise<OutboxEvent> {
   const created = await prisma.outboxEvent.create({
     data: {
       aggregateType: 'review',
-      aggregateId: randomUUID(),
+      aggregateId: overrides.aggregateId ?? randomUUID(),
       eventType,
       payload: {},
       attempts: overrides.attempts ?? 0,
@@ -54,15 +90,7 @@ async function insertOutboxRow(
     occurredAt: new Date().toISOString(),
     aggregateType: 'review',
     aggregateId: created.aggregateId,
-    payload: {
-      reviewId: idToReviewId(created.id),
-      productId: randomUUID(),
-      authorId: randomUUID(),
-      rating: 5,
-      title: 'Great product',
-      body: 'Solid build quality and easy to use every day.',
-      verifiedPurchase: true,
-    },
+    payload: buildPayload(eventType, idToReviewId(created.id)),
   };
 
   return prisma.outboxEvent.update({
@@ -116,6 +144,69 @@ describe('OutboxRelayService.runOnce', () => {
     const received = await h.consumeMany(TOPOLOGY.queues.moderation.name, 5);
     const reviewIds = received.map((m) => (JSON.parse(m.content.toString()) as { payload: { reviewId: string } }).payload.reviewId);
     expect(reviewIds).toEqual(ids.map(idToReviewId));
+  });
+
+  it('marks the surviving rows published when one row in the batch fails to publish', async () => {
+    // This is the exact scenario the separate-transaction failure path
+    // exists for: a batch of several rows where exactly one fails to
+    // publish must not roll back the others. Every other failure/parking
+    // case in this suite seeds a single row, so without this test the
+    // `continue`-on-publish-failure branch in `runOnce` is exercised but
+    // never actually proven to isolate a bad row from good ones sharing
+    // its batch.
+    const good1 = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+    const bad = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+    const good2 = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+
+    const realPublish = publisher.publish.bind(publisher);
+    vi.spyOn(publisher, 'publish').mockImplementation(async (envelope: EventEnvelope) => {
+      if (envelope.aggregateId === bad.aggregateId) throw new Error('boom for the middle row');
+      await realPublish(envelope);
+    });
+
+    const result = await relay.runOnce();
+    expect(result).toEqual({ published: 2, failed: 1 });
+
+    const [after1, afterBad, after2] = await Promise.all([
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: good1.id } }),
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: bad.id } }),
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: good2.id } }),
+    ]);
+    expect(after1.publishedAt).not.toBeNull();
+    expect(after2.publishedAt).not.toBeNull();
+    expect(afterBad.publishedAt).toBeNull();
+    expect(afterBad.attempts).toBe(1);
+    expect(afterBad.lastError).toMatch(/boom for the middle row/);
+
+    // and the two survivors actually reached the broker, not just the DB
+    const received = await h.consumeMany(TOPOLOGY.queues.moderation.name, 2, 5_000);
+    expect(received).toHaveLength(2);
+  });
+
+  it('publishes review.unpublished before review.submitted for the same aggregate', async () => {
+    // The concrete scenario `ORDER BY id` exists for: editing an approved
+    // review emits `review.unpublished` then `review.submitted` for the
+    // same aggregate, and a consumer that saw them in the opposite order
+    // would recompute a rating from text that is back on display. The two
+    // event types route to different queues (aggregation vs. moderation —
+    // see topology.ts), so queue delivery order can't observe this;
+    // spying on `publisher.publish`'s call order can, since `runOnce`
+    // calls it once per claimed row in claim order.
+    const aggregateId = randomUUID();
+    const unpublishedRow = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_UNPUBLISHED, { aggregateId });
+    const submittedRow = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED, { aggregateId });
+    expect(unpublishedRow.id < submittedRow.id).toBe(true);
+
+    const publishOrder: string[] = [];
+    const realPublish = publisher.publish.bind(publisher);
+    vi.spyOn(publisher, 'publish').mockImplementation(async (envelope: EventEnvelope) => {
+      if (envelope.aggregateId === aggregateId) publishOrder.push(envelope.eventType);
+      await realPublish(envelope);
+    });
+
+    await relay.runOnce();
+
+    expect(publishOrder).toEqual([EVENT_TYPES.REVIEW_UNPUBLISHED, EVENT_TYPES.REVIEW_SUBMITTED]);
   });
 
   it('does not republish a row it already published', async () => {
