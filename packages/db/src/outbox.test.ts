@@ -105,6 +105,27 @@ describe('writeOutboxEvent', () => {
     expect(tx.outboxEvent.create).not.toHaveBeenCalled();
   });
 
+  // Before `.strict()` (see @reviews/contracts's events.ts), a payload
+  // carrying a field its schema doesn't know about was silently stripped by
+  // `z.object`, not rejected — the one gate meant to validate a payload
+  // before it becomes a durable outbox record would let an unrecognised
+  // field vanish with no error and no failing test. This is the caller
+  // actually reaching `writeOutboxEvent`, not just the schema in isolation
+  // (see @reviews/contracts's events.test.ts for that).
+  it('rejects a payload carrying a field its schema does not recognise, before any insert is attempted', async () => {
+    const tx = createTxMock();
+
+    await expect(
+      writeOutboxEvent(tx as never, {
+        eventType: EVENT_TYPES.REVIEW_SUBMITTED,
+        aggregateId: AGGREGATE_ID,
+        payload: { ...VALID_SUBMITTED_PAYLOAD, promoCode: 'DROPPED-SILENTLY' },
+      }),
+    ).rejects.toThrow(OutboxValidationError);
+
+    expect(tx.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
   it('accepts a moderation event using the shared moderated-payload schema', async () => {
     const tx = createTxMock();
 

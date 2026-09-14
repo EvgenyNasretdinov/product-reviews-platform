@@ -30,4 +30,25 @@ describe('eventEnvelopeSchema', () => {
   it('rejects an envelope whose version is unknown', () => {
     expect(() => envelope.parse({ ...validEnvelope, version: 2 })).toThrow();
   });
+
+  // The outbox is meant to be the one gate that validates a payload before
+  // it becomes a durable record — but a plain `z.object` silently strips
+  // unknown keys instead of rejecting them, so a field added to a payload
+  // literal without a matching schema update would vanish with no error and
+  // no failing test. `.strict()` on both the envelope and the payload
+  // schema is what turns that into a thrown validation error instead. This
+  // test targets the payload; a sibling case immediately below targets the
+  // envelope's own top-level keys.
+  it('rejects a payload with an unknown field instead of silently dropping it', () => {
+    const withExtraField = {
+      ...validEnvelope,
+      payload: { ...validEnvelope.payload, promoCode: 'DROPPED-SILENTLY' },
+    };
+
+    expect(() => envelope.parse(withExtraField)).toThrow();
+  });
+
+  it('rejects an envelope with an unknown top-level field', () => {
+    expect(() => envelope.parse({ ...validEnvelope, extra: 'unexpected' })).toThrow();
+  });
 });
