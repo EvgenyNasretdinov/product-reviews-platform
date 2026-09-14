@@ -110,7 +110,7 @@ describe('registerConsumer', () => {
     process.on('unhandledRejection', onUnhandledRejection);
 
     try {
-      const handle = await registerConsumer(channel, 'test-queue', async () => {
+      const handle = await registerConsumer(channel, 'test-queue', () => {
         throw new Error('handler blew up');
       });
 
