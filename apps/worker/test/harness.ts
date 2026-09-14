@@ -1,12 +1,17 @@
 import { createPrismaClient, type PrismaClient } from '@reviews/db';
 import amqplib, { type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
+import { Redis } from 'ioredis';
 import { inject } from 'vitest';
+import type { CacheService } from '../src/cache/cache.service.js';
+import { RedisCacheService } from '../src/cache/redis-cache.service.js';
 import { EventPublisher, type EventEnvelope } from '../src/messaging/event.publisher.js';
 import { assertTopology, dlqName, TOPOLOGY } from '../src/messaging/topology.js';
 
 export interface WorkerHarness {
   readonly prisma: PrismaClient;
   readonly channel: ConfirmChannel;
+  /** A real `CacheService`, backed by the Redis container started in global-setup.ts. */
+  readonly cache: CacheService;
   publish(envelope: EventEnvelope): Promise<void>;
   /**
    * Sends `content` straight to `queue`, bypassing the exchange and
@@ -45,12 +50,15 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
   const connectionModel: ChannelModel = await amqplib.connect(inject('rabbitmqUrl'));
   const channel = await connectionModel.createConfirmChannel();
   await assertTopology(channel);
+  const redis = new Redis(inject('redisUrl'), { maxRetriesPerRequest: 1, lazyConnect: false });
+  const cache = new RedisCacheService(redis);
 
   const publisher = new EventPublisher({ getChannel: () => channel });
 
   return {
     prisma,
     channel,
+    cache,
     publish: (envelope) => publisher.publish(envelope),
     publishRaw: (queue, content) => {
       channel.sendToQueue(queue, Buffer.from(JSON.stringify(content)), { persistent: true });
@@ -65,6 +73,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
       await channel.close();
       await connectionModel.close();
       await prisma.$disconnect();
+      redis.disconnect();
     },
   };
 }

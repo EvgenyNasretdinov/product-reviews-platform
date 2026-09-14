@@ -17,6 +17,12 @@ export const envSchema = z.object({
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
+  // Optional, unlike DATABASE_URL/RABBITMQ_URL: only AggregationModule
+  // (Task 5's cache invalidation) needs it, and that module isn't wired
+  // into AppModule yet (later task), so requiring it here would fail every
+  // other suite's boot for a dependency they don't use. AggregationModule
+  // itself throws a clear error if it's ever constructed without one.
+  REDIS_URL: z.string().url().optional(),
 });
 
 export interface AppEnv {
@@ -26,6 +32,7 @@ export interface AppEnv {
   outboxBatchSize: number;
   outboxMaxAttempts: number;
   outboxPollIntervalMs: number;
+  redisUrl?: string;
 }
 
 /**
@@ -52,5 +59,6 @@ export function loadEnv(source: NodeJS.ProcessEnv): AppEnv {
     outboxBatchSize: env.OUTBOX_BATCH_SIZE,
     outboxMaxAttempts: env.OUTBOX_MAX_ATTEMPTS,
     outboxPollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
+    redisUrl: env.REDIS_URL,
   };
 }
