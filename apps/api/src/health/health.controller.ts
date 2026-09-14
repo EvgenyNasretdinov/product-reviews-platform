@@ -1,5 +1,6 @@
 import { Controller, Get, Inject, ServiceUnavailableException } from '@nestjs/common';
 import type { Redis } from 'ioredis';
+import { Public } from '../auth/decorators/public.decorator.js';
 import { REDIS_CLIENT } from '../common/redis/redis.constants.js';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
@@ -29,6 +30,10 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
 }
 
+// Both endpoints here are public: an orchestrator's liveness/readiness
+// probes carry no bearer token, and the failing-closed global JwtAuthGuard
+// would otherwise 401 them.
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(

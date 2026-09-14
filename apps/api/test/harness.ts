@@ -2,9 +2,11 @@ import 'reflect-metadata';
 import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import type { Role } from '@reviews/db';
 import supertest from 'supertest';
 import { afterAll, afterEach, beforeAll, inject } from 'vitest';
 import { AppModule } from '../src/app.module.js';
+import { hashPassword } from '../src/auth/password.js';
 import { configureApp } from '../src/bootstrap.js';
 import { PrismaService } from '../src/common/prisma/prisma.service.js';
 
@@ -12,6 +14,15 @@ export interface TestApp {
   app: INestApplication;
   prisma: PrismaService;
   request: supertest.Agent;
+  /**
+   * Logs in as `email` through the real `POST /auth/login` route and
+   * returns the bearer token, so the token is accepted by the running app
+   * exactly as a real client's would be. If `email` doesn't already exist
+   * it is created on the fly with a known password — the harness truncates
+   * every table between tests (see `truncate`), so no row, seeded or
+   * otherwise, is guaranteed to survive into a test body.
+   */
+  loginAs(email: string): Promise<string>;
   /** Empties every table between tests. Call this from `afterEach`. */
   truncate(): Promise<void>;
   close(): Promise<void>;
@@ -22,6 +33,35 @@ export interface TestContext {
   readonly app: INestApplication;
   readonly prisma: PrismaService;
   readonly request: supertest.Agent;
+  loginAs(email: string): Promise<string>;
+}
+
+// The password every loginAs-created account uses. Matches the seeded
+// accounts' real password (packages/db/prisma/seed.ts) so a suite that
+// happens to also hit the seed script isn't surprised by a mismatch.
+const LOGIN_PASSWORD = 'password123';
+
+// Mirrors the three canonical accounts the db package's seed always
+// creates (alice/bob/mod — see packages/db/prisma/seed.ts). loginAs
+// upserts by email rather than depending on the seed script having run,
+// so it works identically against a freshly migrated, unseeded database
+// (what every integration test actually runs against) and gives every
+// later suite the same three roles to log in as. An email outside this
+// map still works — it's created as a plain CUSTOMER — for suites that
+// just need *a* distinct authenticated user, not a specific seeded one.
+const KNOWN_SEED_ACCOUNTS: Record<string, { displayName: string; role: Role }> = {
+  'alice@example.com': { displayName: 'Alice Johnson', role: 'CUSTOMER' },
+  'bob@example.com': { displayName: 'Bob Martinez', role: 'CUSTOMER' },
+  'mod@example.com': { displayName: 'Morgan Reyes', role: 'MODERATOR' },
+};
+
+// argon2id hashing is deliberately slow. loginAs may run once per test
+// across many suites, so the fixed login password is hashed once per
+// worker process (memoized here) instead of once per call.
+let loginPasswordHashPromise: Promise<string> | undefined;
+function getLoginPasswordHash(): Promise<string> {
+  loginPasswordHashPromise ??= hashPassword(LOGIN_PASSWORD);
+  return loginPasswordHashPromise;
 }
 
 // The full set of env vars any suite might pass as an override. Every key
@@ -85,10 +125,37 @@ export async function createTestApp(envOverrides: Record<string, string> = {}): 
     );
   };
 
+  const loginAs = async (email: string): Promise<string> => {
+    const known = KNOWN_SEED_ACCOUNTS[email];
+    const passwordHash = await getLoginPasswordHash();
+    const displayName = known?.displayName ?? email.split('@')[0] ?? email;
+    const role = known?.role ?? 'CUSTOMER';
+
+    // Upsert rather than create: a suite that calls loginAs(email) more
+    // than once (or reuses an email another test in the same file already
+    // planted) gets the same known credentials every time instead of a
+    // unique-constraint conflict.
+    await prisma.user.upsert({
+      where: { email },
+      create: { email, displayName, passwordHash, role },
+      update: { displayName, passwordHash, role },
+    });
+
+    const res = await supertest(httpServer).post('/api/v1/auth/login').send({ email, password: LOGIN_PASSWORD });
+    if (res.status !== 200) {
+      throw new Error(`loginAs(${email}) failed: POST /api/v1/auth/login returned ${res.status}: ${JSON.stringify(res.body)}`);
+    }
+    // supertest's Response#body is typed `any`; narrow it once here so no
+    // `any` leaks into loginAs's Promise<string> return type.
+    const body = res.body as { accessToken: string };
+    return body.accessToken;
+  };
+
   return {
     app,
     prisma,
     request: supertest(httpServer),
+    loginAs,
     truncate,
     close: () => app.close(),
   };
@@ -134,6 +201,9 @@ export function setupTestApp(envOverrides?: Record<string, string>): TestContext
     },
     get request() {
       return current.request;
+    },
+    loginAs(email: string) {
+      return current.loginAs(email);
     },
   };
 }
