@@ -175,9 +175,6 @@ importers:
       '@testcontainers/rabbitmq':
         specifier: ^12.1.0
         version: 12.1.0
-      '@types/amqplib':
-        specifier: ^0.10.8
-        version: 0.10.8
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.2
@@ -1214,9 +1211,6 @@ packages:
     resolution: {integrity: sha512-0i0mVUa4kKk+/B3RwEwPMf9CB+T7ul56hn5FFHNA4VUNTOoLBEd6aNf3FaKfCatDNZ6cicCEf6if9QUTVyzzcA==}
     cpu: [arm64]
     os: [win32]
-
-  '@types/amqplib@0.10.8':
-    resolution: {integrity: sha512-vtDp8Pk1wsE/AuQ8/Rgtm6KUZYqcnTgNvEHwzCkX8rL7AGsC6zqAfKAAJhUZXFhM/Pp++tbnUHiam/8vVpPztA==}
 
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
@@ -4343,10 +4337,6 @@ snapshots:
 
   '@turbo/windows-arm64@2.10.12':
     optional: true
-
-  '@types/amqplib@0.10.8':
-    dependencies:
-      '@types/node': 22.20.2
 
   '@types/body-parser@1.19.6':
     dependencies:

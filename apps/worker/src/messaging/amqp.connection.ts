@@ -1,12 +1,42 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import amqplib, { type ChannelModel, type ConfirmChannel } from 'amqplib';
-import { APP_ENV } from '../config/config.module.js';
 import type { AppEnv } from '../config/env.js';
 import { assertTopology } from './topology.js';
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+// After this many consecutive failed reconnect attempts, every further
+// attempt logs at error instead of warn: loud enough that an operator
+// tailing logs sees an escalating problem, not one warning line from
+// seventeen minutes ago.
+const LOUD_LOG_THRESHOLD = 3;
+
+/**
+ * The exponential reconnect backoff, capped at `MAX_RECONNECT_DELAY_MS` so
+ * a long outage doesn't mean an ever-growing gap between attempts. A pure
+ * function so its shape is testable without a broker or a real timer.
+ */
+export function computeReconnectDelayMs(attempt: number): number {
+  return Math.min(INITIAL_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+}
+
+/**
+ * Opens a fresh AMQP connection. Defaults to `amqplib.connect`; overridable
+ * (see `AmqpConnection`'s constructor) so the reconnect loop is exercisable
+ * in a unit test with a fake broker instead of a real one.
+ */
+export type AmqpOpener = (url: string) => Promise<ChannelModel>;
+
+/** Renders an unknown rejection reason as a log-safe string without risking `[object Object]` from a bare `String(value)`. */
+function describeError(value: unknown): string {
+  if (value instanceof Error) return value.stack ?? value.message;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return 'unserializable error value';
+  }
+}
 
 /**
  * Owns the single AMQP connection and its confirm channel for this
@@ -19,6 +49,15 @@ const MAX_RECONNECT_ATTEMPTS = 10;
  * `assertTopology` runs on every successful connect, not just the first
  * one: a reconnect after a broker restart must re-declare the topology
  * too, in case the restart came with a clean broker.
+ *
+ * A broker outage is retried forever, not abandoned after a fixed number
+ * of attempts. This process has no HTTP surface for an orchestrator's
+ * healthcheck to fail on, and nothing today restarts it on its own (that
+ * arrives with Plan 3's Compose work) — a worker that gave up would stop
+ * publishing permanently until a human happened to notice. The backoff
+ * still caps at `MAX_RECONNECT_DELAY_MS`, and logging escalates to error
+ * level once a handful of attempts have failed in a row, so the outage is
+ * loud in the logs even though the process itself keeps trying quietly.
  */
 @Injectable()
 export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
@@ -26,9 +65,13 @@ export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
   private connectionModel: ChannelModel | undefined;
   private channel: ConfirmChannel | undefined;
   private reconnectAttempts = 0;
+  private disconnectedAt: number | undefined;
   private shuttingDown = false;
 
-  constructor(@Inject(APP_ENV) private readonly env: AppEnv) {}
+  constructor(
+    private readonly env: AppEnv,
+    private readonly open: AmqpOpener = amqplib.connect,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     await this.connect();
@@ -56,13 +99,14 @@ export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
   }
 
   private async connect(): Promise<void> {
-    const connectionModel = await amqplib.connect(this.env.rabbitmqUrl);
+    const connectionModel = await this.open(this.env.rabbitmqUrl);
     const channel = await connectionModel.createConfirmChannel();
     await assertTopology(channel);
 
     this.connectionModel = connectionModel;
     this.channel = channel;
     this.reconnectAttempts = 0;
+    this.disconnectedAt = undefined;
 
     connectionModel.on('error', (error: Error) => {
       this.logger.error(`AMQP connection error: ${error.message}`);
@@ -71,26 +115,29 @@ export class AmqpConnection implements OnModuleInit, OnModuleDestroy {
       this.channel = undefined;
       this.connectionModel = undefined;
       if (this.shuttingDown) return;
+      this.disconnectedAt ??= Date.now();
       this.logger.warn('AMQP connection closed; scheduling reconnect');
       this.scheduleReconnect();
     });
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this.logger.error(`AMQP reconnect gave up after ${MAX_RECONNECT_ATTEMPTS} attempts`);
-      return;
-    }
-
-    const delay = Math.min(INITIAL_RECONNECT_DELAY_MS * 2 ** this.reconnectAttempts, MAX_RECONNECT_DELAY_MS);
+    const delay = computeReconnectDelayMs(this.reconnectAttempts);
     this.reconnectAttempts += 1;
+    const attempt = this.reconnectAttempts;
 
     setTimeout(() => {
       this.connect().catch((error: unknown) => {
-        this.logger.error(
-          `AMQP reconnect attempt ${this.reconnectAttempts} failed`,
-          error instanceof Error ? error.stack : error,
-        );
+        const elapsedMs = this.disconnectedAt !== undefined ? Date.now() - this.disconnectedAt : 0;
+        const nextDelay = computeReconnectDelayMs(attempt);
+        if (attempt > LOUD_LOG_THRESHOLD) {
+          this.logger.error(
+            `AMQP still disconnected after ${attempt} attempts (${elapsedMs}ms elapsed); retrying in ${nextDelay}ms`,
+            describeError(error),
+          );
+        } else {
+          this.logger.warn(`AMQP reconnect attempt ${attempt} failed; retrying in ${nextDelay}ms: ${describeError(error)}`);
+        }
         this.scheduleReconnect();
       });
     }, delay);
