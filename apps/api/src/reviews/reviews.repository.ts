@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { EVENT_TYPES, type ReviewSort, type VoteValue } from '@reviews/contracts';
-import { Prisma, writeOutboxEvent, type Review } from '@reviews/db';
+import { Prisma, writeOutboxEvent, type Review, type ReviewStatus } from '@reviews/db';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
 /** A review row joined with the author fields the DTO exposes. */
@@ -304,18 +304,28 @@ export class ReviewsRepository {
    * Casts (or changes) `userId`'s vote on `reviewId`, then returns the
    * review's recomputed counters.
    *
-   * One transaction does four things in order: confirm the review is
-   * `APPROVED` (else {@link ReviewNotVotableError}), confirm the voter
-   * isn't the author (else {@link SelfVoteError}), upsert the
-   * `review_votes` row keyed by `(reviewId, userId)` — the table's own
-   * primary key is what makes this idempotent rather than cumulative, a
-   * repeat or changed vote replaces the one row instead of adding another
-   * — and finally recompute both counters from that table.
+   * One transaction does four things in order: lock the review row and, in
+   * that same statement, read the fields needed to confirm it's `APPROVED`
+   * (else {@link ReviewNotVotableError}) and that the voter isn't the
+   * author (else {@link SelfVoteError}); upsert the `review_votes` row
+   * keyed by `(reviewId, userId)` — the table's own primary key is what
+   * makes this idempotent rather than cumulative, a repeat or changed vote
+   * replaces the one row instead of adding another — and finally recompute
+   * both counters from that table.
+   *
+   * The status/author check reads under the same `FOR UPDATE` lock the
+   * vote write relies on (see {@link lockReviewRow}), not from a separate,
+   * unlocked `findUnique` beforehand: a plain read followed by a later lock
+   * would leave a window between the two in which a moderator's concurrent
+   * rejection could commit, so the vote proceeds against a review this
+   * transaction never actually confirmed was still `APPROVED`. Locking
+   * first and reading the same locked row closes that window — the two
+   * checks are in-process and add no I/O, so folding them into the locking
+   * statement costs nothing.
    *
    * The counters are recomputed, not incremented, and the recompute runs
    * inside this same transaction rather than after it. Concurrent votes on
-   * the same review serialise on an explicit `SELECT ... FOR UPDATE` lock
-   * (see {@link lockReviewRow}) taken *before* the `review_votes` write, so
+   * the same review serialise on the `FOR UPDATE` lock taken up front, so
    * every recompute that follows sees a snapshot that already includes
    * every vote whose transaction committed first. An `increment` has no
    * such serialisation point: two concurrent transactions can both read the
@@ -329,18 +339,13 @@ export class ReviewsRepository {
    */
   async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteCounts> {
     return this.prisma.$transaction(async (tx) => {
-      const review = await tx.review.findUnique({
-        where: { id: reviewId },
-        select: { id: true, authorId: true, status: true },
-      });
+      const review = await lockReviewRow(tx, reviewId);
       if (!review || review.status !== 'APPROVED') {
         throw new ReviewNotVotableError(reviewId);
       }
       if (review.authorId === userId) {
         throw new SelfVoteError(reviewId);
       }
-
-      await lockReviewRow(tx, reviewId);
 
       await tx.reviewVote.upsert({
         where: { reviewId_userId: { reviewId, userId } },
@@ -369,6 +374,9 @@ export class ReviewsRepository {
    */
   async removeVote(reviewId: string, userId: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      // The locked row's fields aren't needed here — removeVote never
+      // checks the review's status or author (see this method's own doc
+      // comment above) — so the return value is discarded.
       await lockReviewRow(tx, reviewId);
       await tx.reviewVote.deleteMany({ where: { reviewId, userId } });
       await recomputeVoteCounts(tx, reviewId);
@@ -376,10 +384,36 @@ export class ReviewsRepository {
   }
 }
 
+/** The `reviews` fields {@link lockReviewRow} reads from behind its lock. */
+interface LockedReview {
+  authorId: string;
+  status: ReviewStatus;
+}
+
 /**
- * Takes an exclusive row lock on `reviews` for `reviewId`, as its own
+ * Takes an exclusive row lock on `reviews` for `reviewId` and, in that same
+ * statement, reads back its author and status — as its own leading
  * statement, before either {@link ReviewsRepository.castVote} or
- * {@link ReviewsRepository.removeVote} writes to `review_votes`.
+ * {@link ReviewsRepository.removeVote} writes to `review_votes`. Returns
+ * `null` if `reviewId` doesn't match any row.
+ *
+ * Reading `author_id`/`status` here rather than via a separate `findUnique`
+ * costs nothing extra — same statement, same round trip — and is what lets
+ * `castVote` make its APPROVED/self-vote checks against a row it already
+ * holds the lock on, closing the race a preceding unlocked read would leave
+ * open against a concurrent moderation decision. Also used by `removeVote`,
+ * which locks the row but has no checks of its own to make, so it discards
+ * the return value.
+ *
+ * Lock mode is `FOR UPDATE`, not the weaker `FOR NO KEY UPDATE` that would
+ * also suffice for mutual exclusion among voters (self-conflicting, same as
+ * `FOR UPDATE`, but — unlike `FOR UPDATE` — compatible with the `FOR KEY
+ * SHARE` a referencing insert takes; see below). `FOR UPDATE` was kept
+ * because `review_votes` is, today, the only table with a foreign key to
+ * `reviews`, so there's no other concurrent locker for the stronger mode to
+ * needlessly block. If a second table ever gains a FK to `reviews`, revisit
+ * this: `FOR NO KEY UPDATE` would stop voting from blocking that table's
+ * concurrent inserts for no reason.
  *
  * This has to run *before* the `review_votes` write, not after it — the
  * ordering matters and was found the hard way. `review_votes.review_id` has
@@ -393,18 +427,29 @@ export class ReviewsRepository {
  * of ten concurrent voters would already be holding that shared lock by the
  * time it tried to upgrade to exclusive, and an upgrade can't proceed until
  * every other shared holder releases — so all ten are waiting on each
- * other and Postgres reports `deadlock detected` (error `40P01`). Acquiring
- * the exclusive lock first avoids the shared lock ever being held by more
- * than one transaction at a time: whichever transaction gets here first
- * wins the lock outright, and every other transaction blocks cleanly on
- * this statement, never reaching its own upsert (and thus never taking the
+ * other and Postgres reports `deadlock detected` (error `40P01`). Note this
+ * is a *different* lock-mode conflict from the one `FOR UPDATE` itself
+ * would have with `FOR KEY SHARE` even without an upgrade: `FOR NO KEY
+ * UPDATE` doesn't conflict with `FOR KEY SHARE` at all, so a version of
+ * this function using that weaker mode from the start would never have
+ * deadlocked here regardless of ordering — it's specifically the request
+ * for `FOR UPDATE`, and specifically requesting it *after* already holding
+ * the shared lock, that produces the upgrade deadlock. Acquiring the
+ * exclusive lock first avoids the shared lock ever being held by more than
+ * one transaction at a time: whichever transaction gets here first wins the
+ * lock outright, and every other transaction blocks cleanly on this
+ * statement, never reaching its own upsert (and thus never taking the
  * shared FK lock) until the row is free.
  *
- * A `reviewId` that matches no row locks nothing and returns immediately —
+ * A `reviewId` that matches no row locks nothing and returns `null` —
  * relied on by `removeVote`, which never checks the review exists first.
  */
-async function lockReviewRow(tx: Prisma.TransactionClient, reviewId: string): Promise<void> {
-  await tx.$queryRaw`SELECT id FROM reviews WHERE id = ${reviewId}::uuid FOR UPDATE`;
+async function lockReviewRow(tx: Prisma.TransactionClient, reviewId: string): Promise<LockedReview | null> {
+  const rows = await tx.$queryRaw<Array<{ author_id: string; status: ReviewStatus }>>`
+    SELECT author_id, status FROM reviews WHERE id = ${reviewId}::uuid FOR UPDATE
+  `;
+  const row = rows[0];
+  return row ? { authorId: row.author_id, status: row.status } : null;
 }
 
 /**

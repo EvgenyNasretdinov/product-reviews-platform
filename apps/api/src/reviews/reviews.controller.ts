@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { createReviewInputSchema, reviewSortSchema, type ReviewDto } from '@reviews/contracts';
 import { z } from 'zod';
 import { CurrentUser, type AuthenticatedUser } from '../auth/decorators/current-user.decorator.js';
@@ -20,6 +31,14 @@ const listReviewsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+// `productId` is parsed through `ParseUUIDPipe` on both handlers below: it
+// reaches Postgres as a `@db.Uuid` column filter either way, and a
+// syntactically malformed id would otherwise surface as an unmapped
+// Postgres error (falling through the global exception filter to a 500)
+// rather than the 400 a malformed client-supplied id actually warrants —
+// see votes.controller.ts's doc comment for the fuller version of this
+// reasoning, first found there.
+
 @Controller('products/:productId/reviews')
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
@@ -33,7 +52,10 @@ export class ReviewsController {
    */
   @Public()
   @Get()
-  async list(@Param('productId') productId: string, @Query() query: unknown): Promise<ListReviewsResult> {
+  async list(
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Query() query: unknown,
+  ): Promise<ListReviewsResult> {
     const parsed = listReviewsQuerySchema.safeParse(query);
     if (!parsed.success) {
       throw new BadRequestException(parsed.error.issues.map((issue) => issue.message).join('; '));
@@ -57,7 +79,7 @@ export class ReviewsController {
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   async submit(
-    @Param('productId') productId: string,
+    @Param('productId', ParseUUIDPipe) productId: string,
     @Body() body: unknown,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<ReviewDto> {

@@ -119,11 +119,17 @@ describe('PUT/DELETE /api/v1/reviews/:reviewId/vote', () => {
   // `increment`, this reliably loses updates: two concurrent transactions
   // both read the pre-increment value and each writes back their own +1,
   // so the final count lands below 10. Recomputing the counters from
-  // review_votes inside the same transaction as the vote upsert is what
-  // makes this deterministic — concurrent transactions serialise on the
-  // review row (the UPDATE's WHERE r.id = $1), and each one's recount sees
-  // a consistent snapshot of review_votes at the point it acquires the row
-  // lock.
+  // review_votes is what fixes that -- but only because the recompute runs
+  // as its own statement *after* a leading `SELECT ... FOR UPDATE` on the
+  // review row (see reviews.repository.ts's `lockReviewRow`), never blocked
+  // itself. A statement's READ COMMITTED snapshot is taken at that
+  // statement's start, not at the moment a lock it's waiting on is granted
+  // -- a statement that blocks and then unblocks does NOT get a fresh view
+  // of other tables it reads, only of the specific row it collided on. So
+  // merging the lock into the same `UPDATE ... FROM review_votes`
+  // statement (rather than acquiring it first, separately) reproduces the
+  // exact bug this test exists to catch: it was tried, and ten concurrent
+  // voters landed on `helpfulCount: 1`, not 10.
   //
   // The ten requests are launched with Promise.all over an array of
   // already-started request promises (no `await` between the ten `vote()`
@@ -173,5 +179,21 @@ describe('PUT/DELETE /api/v1/reviews/:reviewId/vote', () => {
     const voterToken = await ctx.loginAs('voter-missing@example.com');
 
     await vote(randomUUID(), voterToken, 'HELPFUL').expect(404);
+  });
+
+  // A malformed reviewId reaches ReviewsRepository's raw `::uuid` cast
+  // (lockReviewRow/recomputeVoteCounts in reviews.repository.ts) unless
+  // ParseUUIDPipe rejects it first. Without the pipe this 500s: Postgres
+  // raises 22P02 for the bad cast, and the global PrismaExceptionFilter
+  // only maps P2002/P2025, so anything else falls through to 500.
+  it('rejects a syntactically invalid reviewId with 400, not 500', async () => {
+    const voterToken = await ctx.loginAs('voter-malformed@example.com');
+
+    await ctx.request
+      .put('/api/v1/reviews/not-a-uuid/vote')
+      .auth(voterToken, { type: 'bearer' })
+      .send({ value: 'HELPFUL' })
+      .expect(400);
+    await ctx.request.delete('/api/v1/reviews/not-a-uuid/vote').auth(voterToken, { type: 'bearer' }).expect(400);
   });
 });
