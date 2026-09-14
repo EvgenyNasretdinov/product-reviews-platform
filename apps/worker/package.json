@@ -11,7 +11,7 @@
     "start:dev": "nest start --watch",
     "pretest:unit": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",
     "test:unit": "vitest run --config vitest.config.ts",
-    "pretest:integration": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build) && pnpm exec turbo run build --filter=@reviews/api",
+    "pretest:integration": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
