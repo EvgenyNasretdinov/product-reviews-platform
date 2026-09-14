@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { paginatedSchema, productDetailDtoSchema, type ProductDetailDto } from '@reviews/contracts';
 import type { z } from 'zod';
+import { CacheService } from '../common/cache/cache.service.js';
+import { cacheKeys, TTL_PRODUCT_DETAIL } from '../common/cache/cache.keys.js';
 import { decodeCursor, encodeCursor } from '../common/pagination/cursor.js';
 import { toProductDetailDto } from './products.mapper.js';
 import { ProductsRepository } from './products.repository.js';
@@ -23,7 +25,10 @@ export type ListProductsResult = z.infer<typeof productListSchema>;
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly repository: ProductsRepository) {}
+  constructor(
+    private readonly repository: ProductsRepository,
+    private readonly cache: CacheService,
+  ) {}
 
   async list(query: ListProductsQuery): Promise<ListProductsResult> {
     const cursor = query.cursor ? decodeCursor(query.cursor, CURSOR_SCOPE) : undefined;
@@ -36,11 +41,26 @@ export class ProductsService {
     return { items, nextCursor };
   }
 
+  /**
+   * Cache-aside: a hit returns the cached DTO without touching Postgres; a
+   * miss computes it from the repository and writes it back before
+   * returning. This is the hottest read in the catalogue — a product page
+   * — and it changes only when moderation publishes a review, so serving a
+   * `TTL_PRODUCT_DETAIL`-second-stale copy is the right trade, not a bug.
+   */
   async getBySlug(slug: string): Promise<ProductDetailDto> {
+    const key = cacheKeys.productDetail(slug);
+    const cached = await this.cache.get<ProductDetailDto>(key);
+    if (cached !== null) {
+      return cached;
+    }
+
     const row = await this.repository.findBySlug(slug);
     if (!row) {
       throw new NotFoundException('Product not found');
     }
-    return toProductDetailDto(row);
+    const dto = toProductDetailDto(row);
+    await this.cache.set(key, dto, TTL_PRODUCT_DETAIL);
+    return dto;
   }
 }
