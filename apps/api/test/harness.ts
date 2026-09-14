@@ -121,6 +121,32 @@ export async function createTestApp(envOverrides: Record<string, string> = {}): 
   // no `any` leaks into the exported TestApp shape.
   const httpServer = app.getHttpServer() as Server;
 
+  // Node >=19 defaults `http.globalAgent` to `keepAlive: true` with a 5s
+  // free-socket timeout, and superagent (what supertest is built on) uses
+  // that global agent by default. This server's own `keepAliveTimeout`
+  // defaults to 5s too — Node's usual default — so a pooled client socket
+  // can be reused by supertest at almost exactly the instant this server
+  // decides to close it for being idle, which reads as a `socket hang up`
+  // / `ECONNRESET` on whichever request happened to land in that window.
+  // The failure isn't tied to load or to this machine: it's a race between
+  // two independently-configured 5s timers, and it gets more likely
+  // whenever request pacing in a suite happens to drift near that
+  // boundary — exactly the "flaky in CI, passes on rerun" signature this
+  // was diagnosed from.
+  //
+  // Fixed here by widening the server's own timeouts well past the
+  // client's, rather than by disabling keep-alive on the client (a
+  // `{ keepAlive: false }` supertest agent): that would mean opening a
+  // fresh connection per request across every integration suite, which
+  // both slows every file down and stops this harness from exercising the
+  // connection-reuse path `main.ts`'s production server actually serves
+  // real traffic under. 61s for `keepAliveTimeout` is the conventional
+  // value (matches what's commonly recommended in front of a load
+  // balancer with its own longer idle timeout); `headersTimeout` has to
+  // exceed it or Node's own invariant check throws at request time.
+  httpServer.keepAliveTimeout = 61_000;
+  httpServer.headersTimeout = 65_000;
+
   const truncate = async (): Promise<void> => {
     await prisma.$executeRawUnsafe(
       'TRUNCATE TABLE outbox, review_votes, reviews, product_rating_summary, purchases, products, users RESTART IDENTITY CASCADE',

@@ -22,11 +22,16 @@ const listProductsQuerySchema = z.object({
 });
 
 @ApiTags('products')
-@Public()
 @Controller('products')
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
+  // `@Public()` on each handler individually, not the controller: a route
+  // added to this controller tomorrow with no decorator of its own must
+  // default to behind the global JwtAuthGuard, not silently inherit public
+  // access from the class. See ReviewsController#list for the same
+  // per-handler placement, first established there.
+  @Public()
   @Get()
   @ApiOperation({ summary: 'Search the product catalogue' })
   @ApiQuery({ name: 'q', required: false, type: String, description: 'Free-text search term.' })
@@ -42,6 +47,7 @@ export class ProductsController {
     return this.productsService.list(parsed.data);
   }
 
+  @Public()
   @Get(':slug')
   @ApiOperation({ summary: 'Fetch one product by slug, with its rating summary' })
   @ApiParam({ name: 'slug', type: String })

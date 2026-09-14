@@ -20,7 +20,6 @@
     "test:unit": "vitest run --passWithNoTests --exclude test/schema.integration.test.ts",
     "pretest:integration": "pnpm run generate",
     "test:integration": "vitest run test/schema.integration.test.ts",
-    "test": "vitest run test/schema.integration.test.ts",
     "predb:migrate": "pnpm run generate",
     "db:migrate": "prisma migrate deploy",
     "predb:seed": "pnpm run generate",

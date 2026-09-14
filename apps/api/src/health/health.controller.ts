@@ -35,9 +35,11 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 // Both endpoints here are public: an orchestrator's liveness/readiness
 // probes carry no bearer token, and the failing-closed global JwtAuthGuard
-// would otherwise 401 them.
+// would otherwise 401 them. `@Public()` is applied per handler below, not
+// at the class level — a route added to this controller tomorrow with no
+// decorator of its own must default to behind the guard, not silently
+// inherit public access from the class.
 @ApiTags('health')
-@Public()
 @Controller('health')
 export class HealthController {
   constructor(
@@ -50,6 +52,7 @@ export class HealthController {
    * Deliberately touches no dependency — a Redis or Postgres blip must not
    * make an orchestrator restart an otherwise healthy process.
    */
+  @Public()
   @Get()
   @ApiOperation({ summary: 'Liveness probe: is the process up?' })
   @ApiResponse({ status: 200, type: LivenessResponseDto })
@@ -63,6 +66,7 @@ export class HealthController {
    * Returns 503 (via a thrown HttpException, handled by the global
    * exception filter) when any dependency is down.
    */
+  @Public()
   @Get('ready')
   @ApiOperation({ summary: 'Readiness probe: are Postgres and Redis both reachable?' })
   @ApiResponse({ status: 200, type: ReadinessResponseDto })
