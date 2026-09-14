@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { EVENT_TYPES, type ReviewSort } from '@reviews/contracts';
+import { EVENT_TYPES, type ReviewSort, type VoteValue } from '@reviews/contracts';
 import { Prisma, writeOutboxEvent, type Review } from '@reviews/db';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
@@ -139,6 +139,12 @@ export interface SubmitReviewParams {
   body: string;
 }
 
+/** The two denormalised vote counters on a `reviews` row. */
+export interface VoteCounts {
+  helpfulCount: number;
+  notHelpfulCount: number;
+}
+
 /**
  * Thrown from inside {@link ReviewsRepository.submit}'s transaction when
  * `productId` doesn't reference a real product. Deliberately a plain
@@ -150,6 +156,37 @@ export class ProductNotFoundError extends Error {
   constructor(public readonly productId: string) {
     super(`Product ${productId} not found`);
     this.name = 'ProductNotFoundError';
+  }
+}
+
+/**
+ * Thrown from inside {@link ReviewsRepository.castVote} when `reviewId`
+ * doesn't reference an `APPROVED` review — either because no such review
+ * exists at all, or because it exists but hasn't cleared moderation yet.
+ * Both collapse onto the same error (and, in `VotesService`, the same 404):
+ * a review that isn't publicly addressable must not be distinguishable from
+ * one that doesn't exist, or the response itself would leak which pending
+ * reviews are real.
+ */
+export class ReviewNotVotableError extends Error {
+  constructor(public readonly reviewId: string) {
+    super(`Review ${reviewId} is not votable`);
+    this.name = 'ReviewNotVotableError';
+  }
+}
+
+/**
+ * Thrown from inside {@link ReviewsRepository.castVote} when the voter is
+ * the review's own author. Checked only after the review is confirmed to
+ * exist and be `APPROVED` — see {@link ReviewNotVotableError}'s doc comment
+ * for why that ordering matters: checking self-vote first would answer 403
+ * for a non-approved review the caller happens to own, confirming its
+ * existence through the status code alone.
+ */
+export class SelfVoteError extends Error {
+  constructor(public readonly reviewId: string) {
+    super(`User cannot vote on their own review ${reviewId}`);
+    this.name = 'SelfVoteError';
   }
 }
 
@@ -262,6 +299,169 @@ export class ReviewsRepository {
     const hasMore = rows.length > limit;
     return { rows: hasMore ? rows.slice(0, limit) : rows, hasMore };
   }
+
+  /**
+   * Casts (or changes) `userId`'s vote on `reviewId`, then returns the
+   * review's recomputed counters.
+   *
+   * One transaction does four things in order: confirm the review is
+   * `APPROVED` (else {@link ReviewNotVotableError}), confirm the voter
+   * isn't the author (else {@link SelfVoteError}), upsert the
+   * `review_votes` row keyed by `(reviewId, userId)` — the table's own
+   * primary key is what makes this idempotent rather than cumulative, a
+   * repeat or changed vote replaces the one row instead of adding another
+   * — and finally recompute both counters from that table.
+   *
+   * The counters are recomputed, not incremented, and the recompute runs
+   * inside this same transaction rather than after it. Concurrent votes on
+   * the same review serialise on an explicit `SELECT ... FOR UPDATE` lock
+   * (see {@link lockReviewRow}) taken *before* the `review_votes` write, so
+   * every recompute that follows sees a snapshot that already includes
+   * every vote whose transaction committed first. An `increment` has no
+   * such serialisation point: two concurrent transactions can both read the
+   * pre-vote count and each write back their own +1, silently losing one of
+   * the two votes. See test/votes.integration.test.ts's ten-concurrent-
+   * voters case.
+   *
+   * The lock is taken before the upsert, not after — see
+   * {@link lockReviewRow}'s doc comment for why acquiring it afterward
+   * deadlocks under concurrency instead of merely serialising.
+   */
+  async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteCounts> {
+    return this.prisma.$transaction(async (tx) => {
+      const review = await tx.review.findUnique({
+        where: { id: reviewId },
+        select: { id: true, authorId: true, status: true },
+      });
+      if (!review || review.status !== 'APPROVED') {
+        throw new ReviewNotVotableError(reviewId);
+      }
+      if (review.authorId === userId) {
+        throw new SelfVoteError(reviewId);
+      }
+
+      await lockReviewRow(tx, reviewId);
+
+      await tx.reviewVote.upsert({
+        where: { reviewId_userId: { reviewId, userId } },
+        create: { reviewId, userId, value },
+        update: { value },
+      });
+
+      return recomputeVoteCounts(tx, reviewId);
+    });
+  }
+
+  /**
+   * Removes `userId`'s vote on `reviewId`, if one exists, then recomputes
+   * the review's counters in the same transaction — see {@link castVote}
+   * for why the recompute has to be a recompute, why it has to share the
+   * vote write's transaction, and why the row lock has to be acquired
+   * before that write.
+   *
+   * Deliberately does not check that the review exists or is `APPROVED`
+   * first: removing a vote that is already absent (or was cast against a
+   * review that has since been un-approved) has still succeeded from the
+   * caller's point of view, which is why `VotesController#remove` answers
+   * `204` unconditionally rather than surfacing a 404 here. `deleteMany`
+   * (not `delete`) is what makes the "no such vote" case a no-op instead of
+   * Prisma's `P2025`.
+   */
+  async removeVote(reviewId: string, userId: string): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await lockReviewRow(tx, reviewId);
+      await tx.reviewVote.deleteMany({ where: { reviewId, userId } });
+      await recomputeVoteCounts(tx, reviewId);
+    });
+  }
+}
+
+/**
+ * Takes an exclusive row lock on `reviews` for `reviewId`, as its own
+ * statement, before either {@link ReviewsRepository.castVote} or
+ * {@link ReviewsRepository.removeVote} writes to `review_votes`.
+ *
+ * This has to run *before* the `review_votes` write, not after it — the
+ * ordering matters and was found the hard way. `review_votes.review_id` has
+ * a foreign key to `reviews.id`, and Postgres enforces that by implicitly
+ * taking a `FOR KEY SHARE` lock on the referenced `reviews` row for the
+ * duration of any transaction that inserts a referencing `review_votes`
+ * row. `FOR KEY SHARE` locks from different transactions are mutually
+ * compatible — many concurrent voters' upserts can all hold one on the same
+ * review at once. If the exclusive `FOR UPDATE` lock were requested
+ * *after* the upsert (as an original version of this code did), every one
+ * of ten concurrent voters would already be holding that shared lock by the
+ * time it tried to upgrade to exclusive, and an upgrade can't proceed until
+ * every other shared holder releases — so all ten are waiting on each
+ * other and Postgres reports `deadlock detected` (error `40P01`). Acquiring
+ * the exclusive lock first avoids the shared lock ever being held by more
+ * than one transaction at a time: whichever transaction gets here first
+ * wins the lock outright, and every other transaction blocks cleanly on
+ * this statement, never reaching its own upsert (and thus never taking the
+ * shared FK lock) until the row is free.
+ *
+ * A `reviewId` that matches no row locks nothing and returns immediately —
+ * relied on by `removeVote`, which never checks the review exists first.
+ */
+async function lockReviewRow(tx: Prisma.TransactionClient, reviewId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM reviews WHERE id = ${reviewId}::uuid FOR UPDATE`;
+}
+
+/**
+ * Recomputes `reviewId`'s `helpful_count`/`not_helpful_count` from
+ * `review_votes` and writes both back in one statement — the SQL from this
+ * task's brief, run as a raw query because Prisma's query builder has no
+ * portable way to express "set a column to an aggregate computed from a
+ * different table" in a single UPDATE. Runs against `tx`, never against the
+ * plain client, so it always executes inside the same transaction as
+ * {@link lockReviewRow} and the vote write that precede it in
+ * {@link ReviewsRepository.castVote} and {@link ReviewsRepository.removeVote}.
+ *
+ * Callers must have already called {@link lockReviewRow} for this exact
+ * `reviewId` earlier in the same transaction. That's what makes a single
+ * `UPDATE ... FROM` statement here safe: because this transaction already
+ * holds the exclusive lock (acquired via its own leading statement, before
+ * any write to `review_votes`), this `UPDATE` never itself has to wait — it
+ * runs immediately, taking a fresh READ COMMITTED snapshot at that moment,
+ * which correctly includes every vote already committed by every other
+ * transaction that held the lock earlier and has since released it. Only a
+ * statement that *itself* blocks on a row lock is at risk of the stale-read
+ * gotcha this comment used to describe (Postgres's docs, "13.2.1. Read
+ * Committed Isolation Level": a blocked, re-evaluated statement "does not
+ * see effects of [concurrent] commands on other rows in the database") —
+ * that risk was reproduced directly by an earlier version of this code that
+ * combined the lock and the aggregate into one statement and landed ten
+ * concurrent voters on `helpfulCount: 1`, not 10. See
+ * test/votes.integration.test.ts's ten-concurrent-voters case.
+ *
+ * An `UPDATE` against a `reviewId` that doesn't match any row is a harmless
+ * no-op, not an error — relied on by `removeVote`, which never checks the
+ * review exists before calling this.
+ */
+async function recomputeVoteCounts(tx: Prisma.TransactionClient, reviewId: string): Promise<VoteCounts> {
+  // Postgres has no implicit uuid = text comparison, and Prisma's tagged
+  // template substitutes every interpolated value as text by default — every
+  // occurrence of reviewId below needs the explicit ::uuid cast, or this
+  // fails with "operator does not exist: uuid = text" against real Postgres.
+  await tx.$executeRaw`
+    UPDATE reviews r SET
+      helpful_count     = v.helpful,
+      not_helpful_count = v.not_helpful
+    FROM (
+      SELECT
+        count(*) FILTER (WHERE value = 'HELPFUL')     AS helpful,
+        count(*) FILTER (WHERE value = 'NOT_HELPFUL') AS not_helpful
+      FROM review_votes WHERE review_id = ${reviewId}::uuid
+    ) v
+    WHERE r.id = ${reviewId}::uuid
+  `;
+
+  const updated = await tx.review.findUnique({
+    where: { id: reviewId },
+    select: { helpfulCount: true, notHelpfulCount: true },
+  });
+
+  return { helpfulCount: updated?.helpfulCount ?? 0, notHelpfulCount: updated?.notHelpfulCount ?? 0 };
 }
 
 /** True when `error` is the Prisma unique-constraint violation on `reviews`. */
