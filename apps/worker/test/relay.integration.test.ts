@@ -100,6 +100,35 @@ async function insertOutboxRow(
   });
 }
 
+/**
+ * Inserts one outbox row whose `payload` has an `eventType` the worker's
+ * `@reviews/contracts` schemas do not recognise — the shape a rolling
+ * deploy that lands the API one commit ahead of the worker would produce
+ * (every payload schema is `.strict()` and `version` is `z.literal(1)`,
+ * so any drift fails to parse). Unlike {@link insertOutboxRow}, this
+ * writes a `payload` that `parseEnvelope` is guaranteed to reject.
+ */
+async function insertMalformedOutboxRow(prisma: PrismaClient): Promise<OutboxEvent> {
+  const aggregateId = randomUUID();
+  return prisma.outboxEvent.create({
+    data: {
+      aggregateType: 'review',
+      aggregateId,
+      eventType: 'review.no_longer_recognised',
+      payload: {
+        eventId: randomUUID(),
+        eventType: 'review.no_longer_recognised',
+        version: 1,
+        occurredAt: new Date().toISOString(),
+        aggregateType: 'review',
+        aggregateId,
+        payload: {},
+      },
+      attempts: 0,
+    },
+  });
+}
+
 describe('OutboxRelayService.runOnce', () => {
   let h: WorkerHarness;
   let publisher: EventPublisher;
@@ -110,10 +139,24 @@ describe('OutboxRelayService.runOnce', () => {
     h = await createWorkerHarness();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     publisher = new EventPublisher({ getChannel: () => h.channel });
     repository = new OutboxRepository(h.prisma);
     relay = new OutboxRelayService(h.prisma, publisher, repository, CONFIG);
+
+    // Files run alphabetically with `fileParallelism: false` (see
+    // vitest.integration.config.ts), so `pipeline.integration.test.ts`
+    // runs before this file and can leave outbox rows behind — its own
+    // cleanup lives in its `afterAll`, not per-test, and its worker
+    // harness publishes through the same shared containers this file
+    // uses. The very first test below asserts `{ published: 1 }`, which
+    // requires the outbox to be empty when it starts; only cleaning up in
+    // `afterEach` (as this suite did before) leaves that first run
+    // dependent on nothing else having inserted a row first — exactly the
+    // "passes because another suite ran first" class of flake this
+    // mirrors on the cleanup side.
+    await h.prisma.outboxEvent.deleteMany();
+    await h.purgeAll();
   });
 
   afterEach(async () => {
@@ -182,6 +225,48 @@ describe('OutboxRelayService.runOnce', () => {
     // and the two survivors actually reached the broker, not just the DB
     const received = await h.consumeMany(TOPOLOGY.queues.moderation.name, 2, 5_000);
     expect(received).toHaveLength(2);
+  });
+
+  /**
+   * C1: a single unparseable row (an `eventType` this worker's contracts
+   * no longer recognise — exactly what a rolling deploy landing the API
+   * one commit ahead of the worker produces) must fail only itself, the
+   * same way a rejected publish does, not escape `claimBatch`'s `.map()`
+   * and abort the whole batch transaction. Before the fix, this row's
+   * `parseEnvelope` call threw out of `claimBatch`, past `runOnce`'s
+   * per-row `try/catch`, aborting the transaction entirely: `runOnce()`
+   * would reject, `published`/`failed` would never be computed, and
+   * — because the row's `attempts` never got recorded — the next
+   * `runOnce()` would claim the exact same row and fail the exact same
+   * way, forever, taking every good row claimed alongside it down too.
+   */
+  it('parks an unparseable row without stalling the rest of the batch', async () => {
+    const good1 = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+    const bad = await insertMalformedOutboxRow(h.prisma);
+    const good2 = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+
+    const result = await relay.runOnce();
+    expect(result).toEqual({ published: 2, failed: 1 });
+
+    const [after1, afterBad, after2] = await Promise.all([
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: good1.id } }),
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: bad.id } }),
+      h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: good2.id } }),
+    ]);
+    expect(after1.publishedAt).not.toBeNull();
+    expect(after2.publishedAt).not.toBeNull();
+    expect(afterBad.publishedAt).toBeNull();
+    expect(afterBad.attempts).toBe(1);
+    expect(afterBad.lastError).toMatch(/eventType/);
+
+    // and the pipeline is not stuck: a later run still drains new rows,
+    // rather than repeatedly re-claiming and re-failing on `bad` forever.
+    const good3 = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
+    const secondResult = await relay.runOnce();
+    expect(secondResult).toEqual({ published: 1, failed: 1 });
+    expect(
+      (await h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: good3.id } })).publishedAt,
+    ).not.toBeNull();
   });
 
   it('publishes review.unpublished before review.submitted for the same aggregate', async () => {
@@ -306,7 +391,16 @@ describe('OutboxRelayService.runOnce', () => {
   it('stopAndDrain waits for a batch already in flight to finish, not just stops the interval', async () => {
     const row = await insertOutboxRow(h.prisma, EVENT_TYPES.REVIEW_SUBMITTED);
 
-    const PUBLISH_DELAY_MS = 250;
+    // Comfortably under PER_ROW_PUBLISH_BUDGET_MS (200ms, see
+    // outbox-relay.service.ts): I1's per-publish deadline races every
+    // `publisher.publish` call against that budget, so a delay at or
+    // above it would make this "slow but eventually confirms" publish
+    // indistinguishable from the stuck-broker case that deadline exists
+    // to fail fast — the row would never publish, defeating this test's
+    // premise. 120ms is slow enough to prove `stopAndDrain` genuinely
+    // waits (versus the ~20ms `pollIntervalMs` below) while leaving 80ms
+    // of headroom under the deadline.
+    const PUBLISH_DELAY_MS = 120;
     const slowPublisher: EventPublisher = {
       publish: async (envelope) => {
         await new Promise((resolve) => setTimeout(resolve, PUBLISH_DELAY_MS));
@@ -321,13 +415,13 @@ describe('OutboxRelayService.runOnce', () => {
     // asking it to stop — otherwise stopAndDrain could race ahead of the
     // first tick ever starting, and would trivially "pass" without ever
     // exercising the drain at all.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
     const beforeDrain = Date.now();
     await slowRelay.stopAndDrain();
     const drainedAfterMs = Date.now() - beforeDrain;
 
-    expect(drainedAfterMs).toBeGreaterThanOrEqual(PUBLISH_DELAY_MS - 50);
+    expect(drainedAfterMs).toBeGreaterThanOrEqual(50);
     const after = await h.prisma.outboxEvent.findUniqueOrThrow({ where: { id: row.id } });
     expect(after.publishedAt).not.toBeNull();
   });

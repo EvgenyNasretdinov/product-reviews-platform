@@ -1,8 +1,8 @@
 import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import type { PrismaClient } from '@reviews/db';
-import type { EventPublisher } from '../messaging/event.publisher.js';
+import type { EventEnvelope, EventPublisher } from '../messaging/event.publisher.js';
 import { forEvent } from '../observability/logger.js';
-import { OutboxRepository } from './outbox.repository.js';
+import { OutboxRepository, parseEnvelope } from './outbox.repository.js';
 
 export interface OutboxRelayConfig {
   batchSize: number;
@@ -21,13 +21,22 @@ interface FailedRow {
 }
 
 /**
- * Worst-case per-row budget for the batch transaction's timeout, in
- * milliseconds. A healthy confirm round-trip is single digits of
- * milliseconds; this budgets two orders of magnitude worse — a slow or
- * backpressured broker — for every row in the batch. Deliberately
- * generous rather than tight: a relay that silently fails whole batches
- * because nobody sized the timeout is a worse failure mode than one that
- * occasionally runs a little long.
+ * Worst-case per-row budget, in milliseconds — both for sizing the batch
+ * transaction's timeout below *and*, since I1's review, the actual
+ * client-side deadline each individual `publisher.publish` call is raced
+ * against (see {@link withDeadline}). A healthy confirm round-trip is
+ * single digits of milliseconds; this budgets two orders of magnitude
+ * worse — a slow or backpressured broker — for every row in the batch.
+ * Deliberately generous rather than tight: a relay that spuriously fails
+ * rows because nobody sized the budget is a worse failure mode than one
+ * that occasionally runs a little long. `EventPublisher.publish` resolves
+ * only on the broker's confirm, and a standard RabbitMQ backpressure
+ * signal (a memory or disk alarm) is the broker accepting the frame and
+ * never confirming it — with no deadline of its own, that promise never
+ * settles, so without this race the whole batch transaction (and every
+ * later poll, since `currentTick` never clears) would hang forever on one
+ * stuck row instead of recording an ordinary publish failure and moving
+ * on.
  */
 const PER_ROW_PUBLISH_BUDGET_MS = 200;
 
@@ -37,6 +46,47 @@ const PER_ROW_PUBLISH_BUDGET_MS = 200;
  * Postgres planning the claim query, committing.
  */
 const TRANSACTION_TIMEOUT_HEADROOM_MS = 2_000;
+
+/**
+ * How long {@link OutboxRelayService.stopAndDrain} waits for a batch
+ * already in flight to finish before giving up and returning anyway,
+ * mirroring `PipelineLifecycle`'s `DRAIN_TIMEOUT_MS` for consumer drain in
+ * `app.module.ts`. Without this bound, a `runOnce()` stuck on a publish
+ * that somehow evaded {@link PER_ROW_PUBLISH_BUDGET_MS} (or stuck
+ * anywhere else inside the transaction) would make `stopAndDrain` — and
+ * therefore `onApplicationShutdown`, and therefore `app.close()` — hang
+ * forever, turning a routine `SIGTERM` into a process that never exits.
+ */
+const STOP_AND_DRAIN_TIMEOUT_MS = 10_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Races `promise` against a `ms`-millisecond timer. If the timer wins,
+ * the returned promise rejects with `message`; `promise` itself is never
+ * cancelled (there is no way to cancel an in-flight amqplib publish or
+ * Prisma call), it is simply no longer awaited by the caller. Both
+ * branches of the race are given a rejection handler, so a `promise` that
+ * eventually settles after the timeout has already fired can never
+ * surface as an unhandled rejection.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
 
 /**
  * Drains the transactional outbox into the broker. This is the seam
@@ -107,10 +157,31 @@ export class OutboxRelayService implements OnApplicationBootstrap {
    * would go on to close the channel and connection underneath it,
    * turning an in-flight publish into a failure instead of letting it
    * finish and commit cleanly.
+   *
+   * Bounded by {@link STOP_AND_DRAIN_TIMEOUT_MS}, mirroring
+   * `PipelineLifecycle.drainConsumers` right below it in the shutdown
+   * sequence: if the in-flight tick hasn't finished by the deadline, this
+   * logs a warning and returns anyway rather than hanging
+   * `onApplicationShutdown` (and therefore `app.close()`, and therefore
+   * `SIGTERM`) forever. `currentTick` itself never rejects (see `tick`'s
+   * doc comment), so the only way this could otherwise hang is a batch
+   * genuinely stuck — which {@link withDeadline} around each publish is
+   * what keeps from happening in the first place; this is the backstop
+   * for every other way a transaction could stall.
    */
   async stopAndDrain(): Promise<void> {
     this.stop();
-    await this.currentTick;
+    if (!this.currentTick) return;
+
+    const timedOut = await Promise.race([
+      this.currentTick.then(() => false),
+      sleep(STOP_AND_DRAIN_TIMEOUT_MS).then(() => true),
+    ]);
+    if (timedOut) {
+      this.logger.warn(
+        `outbox relay: stopAndDrain timed out after ${STOP_AND_DRAIN_TIMEOUT_MS}ms waiting for the in-flight batch to finish`,
+      );
+    }
   }
 
   /**
@@ -174,7 +245,24 @@ export class OutboxRelayService implements OnApplicationBootstrap {
    * `$transaction` below exists because of this same shape: real publish
    * round-trips happen while the batch's row locks are held open, so the
    * transaction has to be given more room than Prisma's 5s default before
-   * a slow broker makes it fail outright.
+   * a slow broker makes it fail outright. That `timeout` bounds the
+   * **database transaction** only — it is enforced by Prisma's query
+   * engine, which has no visibility into (and no power to cancel) a
+   * pending `channel.publish` callback — so it does nothing to protect
+   * the JavaScript control flow above from a broker that accepts a frame
+   * and never confirms it. {@link withDeadline}, wrapped around each
+   * `publisher.publish` call below, is what actually bounds that: a
+   * publish that outlives {@link PER_ROW_PUBLISH_BUDGET_MS} becomes an
+   * ordinary recorded failure for that one row instead of a promise that
+   * never settles.
+   *
+   * Parsing each row's raw payload into an {@link EventEnvelope} also
+   * happens inside this same per-row `try` — never inside
+   * `OutboxRepository.claimBatch` — so that an unparseable payload (an
+   * `eventType` this worker's schema no longer recognises, most likely
+   * from a rolling deploy landing the API ahead of the worker) fails only
+   * that row, the same way a rejected publish does, rather than escaping
+   * the transaction and aborting the whole batch.
    */
   async runOnce(): Promise<RunOnceResult> {
     const failures: FailedRow[] = [];
@@ -185,8 +273,14 @@ export class OutboxRelayService implements OnApplicationBootstrap {
         const rows = await this.repository.claimBatch(tx, this.config.batchSize, this.config.maxAttempts);
 
         for (const row of rows) {
+          let envelope: EventEnvelope;
           try {
-            await this.publisher.publish(row.envelope);
+            envelope = parseEnvelope(row.payload);
+            await withDeadline(
+              this.publisher.publish(envelope),
+              PER_ROW_PUBLISH_BUDGET_MS,
+              `outbox relay: publish did not confirm within ${PER_ROW_PUBLISH_BUDGET_MS}ms`,
+            );
           } catch (error) {
             failures.push({ id: row.id, error: error instanceof Error ? error : new Error(String(error)) });
             continue;
@@ -194,8 +288,8 @@ export class OutboxRelayService implements OnApplicationBootstrap {
 
           await this.repository.markPublished(tx, row.id);
           published += 1;
-          forEvent({ eventId: row.envelope.eventId, reviewId: row.envelope.payload.reviewId }).info(
-            `outbox relay: published event ${row.envelope.eventId} (${row.envelope.eventType})`,
+          forEvent({ eventId: envelope.eventId, reviewId: envelope.payload.reviewId }).info(
+            `outbox relay: published event ${envelope.eventId} (${envelope.eventType})`,
           );
         }
       },

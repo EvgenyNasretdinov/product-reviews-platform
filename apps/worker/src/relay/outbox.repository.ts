@@ -12,9 +12,16 @@ import type { EventEnvelope } from '../messaging/event.publisher.js';
  * `@reviews/db` — so this hands the parsed result straight to
  * `EventPublisher.publish` with no reconstruction. Thrown errors (an
  * unrecognised `eventType`, or a payload that no longer matches its own
- * schema) are treated by the caller exactly like a broker publish failure:
- * the row's `attempts`/`last_error` are recorded and it is retried, rather
- * than crashing the whole batch.
+ * schema) are treated by the caller — `OutboxRelayService.runOnce`, which
+ * calls this itself once per claimed row, inside the same per-row `try`
+ * that already wraps `publisher.publish` — exactly like a broker publish
+ * failure: the row's `attempts`/`last_error` are recorded and it is
+ * retried, rather than crashing the whole batch. Deliberately *not*
+ * called from {@link OutboxRepository.claimBatch}: a throw inside
+ * `claimBatch`'s own `.map()` would escape the batch transaction
+ * entirely, past `runOnce`'s per-row `try/catch`, aborting every publish
+ * in the batch over one unparseable row and leaving that row to be
+ * reclaimed and fail the same way on every subsequent poll, forever.
  */
 export function parseEnvelope(payload: unknown): EventEnvelope {
   const value: unknown = typeof payload === 'string' ? (JSON.parse(payload) as unknown) : payload;
@@ -37,11 +44,15 @@ export function parseEnvelope(payload: unknown): EventEnvelope {
   return parsed.data as EventEnvelope;
 }
 
-/** One row claimed off the outbox, its payload already parsed into a publishable envelope. */
+/**
+ * One row claimed off the outbox. `payload` is deliberately left raw
+ * (unparsed) here — see {@link parseEnvelope}'s doc comment for why
+ * parsing it is the caller's job, not `claimBatch`'s.
+ */
 export interface ClaimedOutboxRow {
   id: bigint;
   attempts: number;
-  envelope: EventEnvelope;
+  payload: unknown;
 }
 
 interface ClaimBatchRow {
@@ -70,6 +81,13 @@ export class OutboxRepository {
    * per-aggregate ordering — the insertion order rows were written in —
    * which matters for a pair like `review.unpublished` then
    * `review.submitted` emitted for the same aggregate.
+   *
+   * Deliberately does *not* call {@link parseEnvelope} on each row: doing
+   * so here, inside this `.map()`, would let a single unparseable
+   * `payload` throw straight out of `claimBatch`, past the caller's
+   * per-row `try/catch`, aborting the whole batch transaction instead of
+   * failing just that one row. Parsing is the caller's job — see
+   * `OutboxRelayService.runOnce`.
    */
   async claimBatch(tx: Prisma.TransactionClient, limit: number, maxAttempts: number): Promise<ClaimedOutboxRow[]> {
     const rows = await tx.$queryRaw<ClaimBatchRow[]>`
@@ -84,7 +102,7 @@ export class OutboxRepository {
     return rows.map((row) => ({
       id: row.id,
       attempts: row.attempts,
-      envelope: parseEnvelope(row.payload),
+      payload: row.payload,
     }));
   }
 
