@@ -1161,9 +1161,14 @@ Expected: FAIL with `404` on every route.
 `ProductsRepository` owns every Prisma call. The list query is keyset pagination:
 
 ```ts
+// The two conditions must be combined under AND. Spreading them as two `OR` keys into one
+// object literal silently drops the first: searching while paginating would return rows that
+// do not match the search, with no error anywhere.
 where: {
-  ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }] } : {}),
-  ...(cursor ? { OR: [{ createdAt: { lt: cursorDate } }, { createdAt: cursorDate, id: { lt: cursorId } }] } : {}),
+  AND: [
+    ...(q ? [{ OR: [{ name: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }] }] : []),
+    ...(cursor ? [{ OR: [{ createdAt: { lt: cursorDate } }, { createdAt: cursorDate, id: { lt: cursorId } }] }] : []),
+  ],
 },
 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
 take: limit + 1,
