@@ -1,0 +1,45 @@
+{
+  "name": "@reviews/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "scripts": {
+    "generate": "./scripts/safe-generate.sh",
+    "build": "pnpm run generate && tsc -b",
+    "typecheck": "pnpm run generate && tsc --noEmit",
+    "lint": "eslint .",
+    "pretest:unit": "pnpm run generate",
+    "test:unit": "vitest run --passWithNoTests --exclude test/schema.integration.test.ts",
+    "pretest:integration": "pnpm run generate",
+    "test:integration": "vitest run test/schema.integration.test.ts",
+    "predb:migrate": "pnpm run generate",
+    "db:migrate": "prisma migrate deploy",
+    "predb:seed": "pnpm run generate",
+    "db:seed": "prisma db seed"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "@reviews/contracts": "workspace:*",
+    "argon2": "^0.45.1",
+    "uuid": "^11.1.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@reviews/tooling": "workspace:*",
+    "@testcontainers/postgresql": "^12.1.0",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "prisma": "6.19.3",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

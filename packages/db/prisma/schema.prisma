@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  MODERATOR
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  FLAGGED
+}
+
+enum VoteValue {
+  HELPFUL
+  NOT_HELPFUL
+}
+
+model User {
+  id           String       @id @default(uuid(7)) @db.Uuid
+  email        String       @unique
+  displayName  String       @map("display_name")
+  passwordHash String       @map("password_hash")
+  role         Role         @default(CUSTOMER)
+  createdAt    DateTime     @default(now()) @map("created_at")
+  reviews      Review[]
+  votes        ReviewVote[]
+  purchases    Purchase[]
+
+  @@map("users")
+}
+
+model Product {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  slug        String   @unique
+  name        String
+  description String
+  priceCents  Int      @map("price_cents")
+  currency    String
+  imageUrl    String?  @map("image_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  reviews       Review[]
+  purchases     Purchase[]
+  ratingSummary ProductRatingSummary?
+
+  @@map("products")
+}
+
+model Purchase {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  productId   String   @map("product_id") @db.Uuid
+  purchasedAt DateTime @default(now()) @map("purchased_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("purchases")
+}
+
+model Review {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  productId        String       @map("product_id") @db.Uuid
+  authorId         String       @map("author_id") @db.Uuid
+  rating           Int
+  title            String
+  body             String
+  status           ReviewStatus @default(PENDING)
+  verifiedPurchase Boolean      @default(false) @map("verified_purchase")
+  moderationReason String?      @map("moderation_reason")
+  helpfulCount     Int          @default(0) @map("helpful_count")
+  notHelpfulCount  Int          @default(0) @map("not_helpful_count")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  publishedAt      DateTime?    @map("published_at")
+
+  product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  author  User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  votes   ReviewVote[]
+
+  @@unique([productId, authorId])
+  @@index([productId, status, createdAt(sort: Desc)])
+  @@index([productId, status, helpfulCount(sort: Desc)])
+  @@map("reviews")
+}
+
+model ReviewVote {
+  reviewId  String    @map("review_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  value     VoteValue
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([reviewId, userId])
+  @@map("review_votes")
+}
+
+model ProductRatingSummary {
+  productId     String   @id @map("product_id") @db.Uuid
+  reviewCount   Int      @default(0) @map("review_count")
+  ratingSum     Int      @default(0) @map("rating_sum")
+  averageRating Decimal  @default(0) @map("average_rating") @db.Decimal(3, 2)
+  count1        Int      @default(0) @map("count_1")
+  count2        Int      @default(0) @map("count_2")
+  count3        Int      @default(0) @map("count_3")
+  count4        Int      @default(0) @map("count_4")
+  count5        Int      @default(0) @map("count_5")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@map("product_rating_summary")
+}
+
+// The `outbox_unpublished_idx` partial index (`WHERE published_at IS NULL`)
+// that the outbox worker actually queries against is not declared here: it
+// is a partial index, and Prisma's schema language cannot express an index
+// predicate. Declaring an ordinary `@@index([id])` here would misdescribe
+// the real index and would make `prisma migrate dev` treat the hand-written
+// partial index as "missing" on every future diff (verified empirically --
+// see docs/adr/0004-identity-columns-over-bigserial.md), generating a
+// migration that recreates it as a plain index and collides with the
+// existing name. The index is created and owned entirely by hand-written
+// SQL in the initial migration instead.
+model OutboxEvent {
+  id            BigInt    @id @default(autoincrement())
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id") @db.Uuid
+  eventType     String    @map("event_type")
+  payload       Json
+  occurredAt    DateTime  @default(now()) @map("occurred_at")
+  publishedAt   DateTime? @map("published_at")
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error")
+
+  @@map("outbox")
+}

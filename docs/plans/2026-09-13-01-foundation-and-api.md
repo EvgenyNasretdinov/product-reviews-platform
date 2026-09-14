@@ -344,6 +344,18 @@ describe('updateReviewInputSchema', () => {
     expect(() => updateReviewInputSchema.parse({})).toThrow();
   });
 
+  // Zod keeps a key in the parsed output whenever it was present in the input, even when its
+  // value is undefined. A guard written over Object.keys therefore counts these as real edits.
+  it('rejects a patch whose only field is undefined', () => {
+    expect(() => updateReviewInputSchema.parse({ rating: undefined })).toThrow();
+  });
+
+  it('rejects a patch whose every field is undefined', () => {
+    expect(() =>
+      updateReviewInputSchema.parse({ rating: undefined, title: undefined, body: undefined }),
+    ).toThrow();
+  });
+
   it('accepts a rating-only patch', () => {
     expect(updateReviewInputSchema.parse({ rating: 3 })).toEqual({ rating: 3 });
   });
@@ -368,6 +380,24 @@ import { EVENT_TYPES, eventEnvelopeSchema, reviewSubmittedPayloadSchema } from '
 
 const envelope = eventEnvelopeSchema(reviewSubmittedPayloadSchema);
 
+const validSubmittedEnvelope = {
+  eventId: '0193a6f0-0000-7000-8000-000000000001',
+  eventType: EVENT_TYPES.REVIEW_SUBMITTED,
+  version: 1,
+  occurredAt: '2026-09-13T10:00:00.000Z',
+  aggregateType: 'review',
+  aggregateId: '0193a6f0-0000-7000-8000-000000000002',
+  payload: {
+    reviewId: '0193a6f0-0000-7000-8000-000000000002',
+    productId: '0193a6f0-0000-7000-8000-000000000003',
+    authorId: '0193a6f0-0000-7000-8000-000000000004',
+    rating: 5,
+    title: 'Great',
+    body: 'Long enough body text.',
+    verifiedPurchase: true,
+  },
+};
+
 describe('eventEnvelopeSchema', () => {
   it('parses a submitted event and coerces occurredAt to a Date', () => {
     const parsed = envelope.parse({
@@ -390,8 +420,10 @@ describe('eventEnvelopeSchema', () => {
     expect(parsed.occurredAt).toBeInstanceOf(Date);
   });
 
+  // Change ONLY the version. Passing a bare { version: 2 } would throw because every other
+  // required field is missing, and the assertion would pass against an unconstrained z.number().
   it('rejects an envelope whose version is unknown', () => {
-    expect(() => envelope.parse({ version: 2 })).toThrow();
+    expect(() => envelope.parse({ ...validSubmittedEnvelope, version: 2 })).toThrow();
   });
 });
 ```
@@ -417,7 +449,9 @@ export const createReviewInputSchema = z.object({
 
 export const updateReviewInputSchema = createReviewInputSchema
   .partial()
-  .refine((patch) => Object.keys(patch).length > 0, { message: 'at least one field must be provided' });
+  .refine((patch) => Object.values(patch).some((v) => v !== undefined), {
+    message: 'at least one field must be provided',
+  });
 
 export const reviewSortSchema = z
   .enum(['helpful', 'newest', 'rating_desc', 'rating_asc'])
@@ -751,7 +785,10 @@ silently revert it."
 - Produces:
   - `loadEnv(source: NodeJS.ProcessEnv): AppEnv` from `src/config/env.ts`, where `AppEnv` is `{ nodeEnv, apiPort, databaseUrl, redisUrl, rabbitmqUrl, jwtSecret, jwtExpiresIn, reviewSubmitRateLimit }`. Throws an `Error` listing every invalid variable at once.
   - `PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy`.
-  - `apps/api/test/harness.ts` exporting `createTestApp(): Promise<TestApp>` where `TestApp = { app: INestApplication; prisma: PrismaService; request: supertest.Agent; close(): Promise<void> }`. **Every later integration task uses this harness** — it starts Postgres and Redis containers once per Vitest worker via a global setup, runs `prisma migrate deploy`, and truncates all tables between tests.
+  - `apps/api/test/harness.ts` exporting two entry points. **Every later integration task uses this harness** — it starts Postgres and Redis containers once per Vitest worker via a global setup and runs `prisma migrate deploy`.
+    - `setupTestApp(envOverrides?: Record<string, string>): TestContext` — **the default path every suite uses.** Called once at the top level of a test file; it registers `beforeAll` (create), `afterEach` (truncate), and `afterAll` (close) itself, so truncation between tests cannot be forgotten. Returns a context exposing `app`, `prisma`, and `request`.
+    - `createTestApp(envOverrides?): Promise<TestApp>` — the manual-control escape hatch, for the rare suite that boots a second app (for example one deliberately configured with a dead dependency). A suite using it owns its own truncation.
+    - `envOverrides` are applied to `process.env` before the Nest module compiles, and **every** overridable key is reset to its default on each call — the suites share one worker, so a key left set by an earlier file would silently change a later one's behaviour.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1080,7 +1117,7 @@ private by default, and forgetting the decorator fails closed."
 
 - [ ] **Step 1: Write the failing integration test**
 
-Cases, all against the harness with `truncate()` in `beforeEach`:
+Cases, all against `setupTestApp()` (which truncates between tests for you):
 
 1. Empty catalogue returns `{ items: [], nextCursor: null }`.
 2. With three products, the list returns all three ordered by `createdAt DESC, id DESC`.
@@ -1124,9 +1161,14 @@ Expected: FAIL with `404` on every route.
 `ProductsRepository` owns every Prisma call. The list query is keyset pagination:
 
 ```ts
+// The two conditions must be combined under AND. Spreading them as two `OR` keys into one
+// object literal silently drops the first: searching while paginating would return rows that
+// do not match the search, with no error anywhere.
 where: {
-  ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }] } : {}),
-  ...(cursor ? { OR: [{ createdAt: { lt: cursorDate } }, { createdAt: cursorDate, id: { lt: cursorId } }] } : {}),
+  AND: [
+    ...(q ? [{ OR: [{ name: { contains: q, mode: 'insensitive' } }, { description: { contains: q, mode: 'insensitive' } }] }] : []),
+    ...(cursor ? [{ OR: [{ createdAt: { lt: cursorDate } }, { createdAt: cursorDate, id: { lt: cursorId } }] }] : []),
+  ],
 },
 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
 take: limit + 1,
@@ -1183,7 +1225,15 @@ Unit tests for `MemoryCacheService`: `get` on a missing key returns `null`; `set
 
 Integration tests for the Redis implementation and the caching behaviour:
 
-1. Two consecutive `GET /products/:slug` requests hit Postgres once — assert by spying on `PrismaService.product.findUnique` (`vi.spyOn`) and expecting one call.
+1. Two consecutive `GET /products/:slug` requests hit Postgres once — assert by counting calls to `PrismaService.product.findUnique` and expecting one.
+
+   Counting those calls needs care. A bare `vi.spyOn` on a Prisma model delegate silently breaks the query: Prisma's delegates are Proxies that misreport property descriptors, so the spy replaces the method rather than wrapping it and the real query never runs. The test then passes whether or not the cache works, which is worse than no test. Capture the original method bound to its delegate first and hand it back to the spy, so it both records calls and executes the genuine query:
+
+   ```ts
+   const delegate = prisma.product;
+   const original = delegate.findUnique.bind(delegate);
+   const spy = vi.spyOn(delegate, 'findUnique').mockImplementation(original);
+   ```
 2. After `cache.del(cacheKeys.productDetail(slug))`, the next request queries again.
 3. A cached payload is byte-identical to the uncached one — fetch, flush, fetch, and `toEqual` the two bodies. This catches serialisation losses such as `Date` becoming a string only on the cache path.
 
@@ -1453,9 +1503,15 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-One transaction per vote: `upsert` the `review_votes` row, then recompute both counters from that table in a single statement rather than incrementing:
+One transaction per vote, and **the statement order is the whole correctness argument**. Take an exclusive lock on the review row as its own statement first, then write the vote, then recompute both counters from `review_votes`:
 
 ```sql
+-- 1. Lock the review row. Its own statement, before any write.
+SELECT author_id, status FROM reviews WHERE id = $1::uuid FOR UPDATE;
+
+-- 2. Upsert the review_votes row (Prisma upsert on the (review_id, user_id) key).
+
+-- 3. Recompute both counters. Never an increment.
 UPDATE reviews r SET
   helpful_count     = v.helpful,
   not_helpful_count = v.not_helpful
@@ -1463,12 +1519,20 @@ FROM (
   SELECT
     count(*) FILTER (WHERE value = 'HELPFUL')     AS helpful,
     count(*) FILTER (WHERE value = 'NOT_HELPFUL') AS not_helpful
-  FROM review_votes WHERE review_id = $1
+  FROM review_votes WHERE review_id = $1::uuid
 ) v
-WHERE r.id = $1
+WHERE r.id = $1::uuid;
 ```
 
-Recomputing inside the transaction is what makes case 8 pass: concurrent transactions serialise on the review row, and each recount sees a consistent snapshot of the votes. An `increment` would read a stale value and lose updates under the same load.
+**Why the leading lock is not redundant.** Doing steps 2 and 3 without step 1 fails under READ COMMITTED, and it fails silently. A statement takes its snapshot at statement start. When ten voters run step 3 concurrently, each blocks on the review row; on unblocking, Postgres re-evaluates the row it collided with but does **not** retake the snapshot, so the aggregate over `review_votes` still reads the pre-wait view. Every voter computes `1` and writes `1`. Serialising the *write* does not make the *read* in the same statement fresh — that is the trap.
+
+With the lock taken first as a separate statement, the recompute never blocks, so it takes a fresh snapshot that includes every vote committed before the lock was acquired.
+
+**Do not merge the lock into the `UPDATE`.** `UPDATE ... FOR UPDATE` is not a thing, and moving the lock later reintroduces the undercount exactly.
+
+`FOR UPDATE` is stronger than strictly needed — `FOR NO KEY UPDATE` self-conflicts, which is all that mutual exclusion among voters requires, and it would not block inserts into other tables holding a foreign key to `reviews`. `review_votes` is currently the only such table, so this costs nothing today; revisit if a second one appears.
+
+An `increment` is wrong for the original reason too: it reads a value a concurrent transaction has already changed, and loses updates under precisely the load that makes the count matter.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1654,7 +1718,7 @@ text, since a moderator cannot judge an excerpt."
 
 - [ ] **Step 1: Write the failing integration test**
 
-Set `REVIEW_SUBMIT_RATE_LIMIT=2` in the harness for this suite. Cases: two submissions to two different products succeed; the third returns `429` with a numeric `Retry-After`; a different user is unaffected; `GET` endpoints are never throttled.
+Boot this suite with `setupTestApp({ REVIEW_SUBMIT_RATE_LIMIT: '2' })`. Cases: two submissions to two different products succeed; the third returns `429` with a numeric `Retry-After`; a different user is unaffected; `GET` endpoints are never throttled.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1751,4 +1815,4 @@ assertion turns that from a discovery into a build failure."
 
 **Deliberate deferrals, recorded so they are not mistaken for gaps:** the outbox relay, the moderation classifier, the rating projection, and cache invalidation on publish are all Plan 2. Until Plan 2 lands, a submitted review stays `PENDING` unless a moderator acts through the Task 14 endpoint, and `product_rating_summary` changes only via the seed. This is a working, testable system — it is simply one where publication is manual.
 
-**Type consistency check.** `CacheService` key builders are defined once in `packages/contracts/src/cache-keys.ts` (Task 9) and imported by both apps, so Plan 2's consumer deletes the keys Task 9 writes. `writeOutboxEvent(tx, event)` from `@reviews/db` has the same signature in Tasks 10, 13, and 14, and Plan 2's moderation consumer imports the same function. `EVENT_TYPES` values in Tasks 10, 13, and 14 match the `eventTypeSchema` enum from Task 3. `createTestApp()` from Task 5 gains `loginAs` in Task 7 and is used unchanged thereafter; fixtures from Task 8 are reused by Tasks 10–15.
+**Type consistency check.** `CacheService` key builders are defined once in `packages/contracts/src/cache-keys.ts` (Task 9) and imported by both apps, so Plan 2's consumer deletes the keys Task 9 writes. `writeOutboxEvent(tx, event)` from `@reviews/db` has the same signature in Tasks 10, 13, and 14, and Plan 2's moderation consumer imports the same function. `EVENT_TYPES` values in Tasks 10, 13, and 14 match the `eventTypeSchema` enum from Task 3. The Task 5 harness gains `loginAs` in Task 7 and is used unchanged thereafter, with `setupTestApp()` as the default entry point and `createTestApp()` reserved for suites needing manual control; fixtures from Task 8 are reused by Tasks 10–15.
