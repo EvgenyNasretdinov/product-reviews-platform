@@ -292,6 +292,13 @@ describe('event pipeline', () => {
     process.env.REDIS_URL = inject('redisUrl');
 
     worker = createWorkerHarness(prisma);
+    // Started here, not inside the first test: tests 2-4 submit a review
+    // and wait for the moderation/aggregation queues to process it without
+    // ever calling worker.start() themselves, so they only ever passed
+    // because vitest runs this file's tests in declaration order and test
+    // 1 happened to start the worker as a side effect — a suite that
+    // passes only because an earlier test in the same file ran first.
+    await worker.start();
   }, 60_000);
 
   afterAll(async () => {
@@ -316,8 +323,6 @@ describe('event pipeline', () => {
         .auth(token, { type: 'bearer' })
         .send({ rating: 1, title: 'Broke in a week', body: 'The switch failed after six days of light use.' })
         .expect(202);
-
-      await worker.start();
 
       await waitFor(
         async () => {
