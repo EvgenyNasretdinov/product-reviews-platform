@@ -493,7 +493,7 @@ test('a guest can browse the catalogue and read reviews', async ({ page }) => {
 ```ts
 test('a submitted review is moderated and becomes publicly visible', async ({ page, browser }) => {
   await signIn(page, 'alice@example.com');
-  await page.goto('/products/desk-lamp');
+  await page.goto('/products/smart-led-desk-lamp');
 
   await page.getByRole('radio', { name: '2 stars' }).click();
   await page.getByLabel(/title/i).fill('Stopped working');
@@ -801,4 +801,4 @@ warrants and what would justify simplifying it."
 
 **Type consistency.** `apiFetch` (Task 1) is the only network entry point and is used by every hook in Tasks 3–6. `SessionUser` comes from `sessionUserDtoSchema` in `@reviews/contracts` (Plan 1 Task 3), not redefined. `createReviewInputSchema` drives both the form validation in Task 4 and the API validation in Plan 1 Task 10, which is the point of putting it in a shared package. `cacheKeys` is untouched here — the web app has no cache of its own beyond React Query. `data-testid` values used in Task 7's specs (`review-list`, `review-item`, `review-rating`, `your-review`, `rating-summary`) are introduced in Tasks 3 and 4 and listed in Task 7 Step 3 so neither side invents its own.
 
-**One risk worth naming.** Task 8's Compose file and Task 9's E2E job both assume the seeded product slug `desk-lamp` exists, and Task 7's specs address it by name. That slug is fixed in Plan 1 Task 4's seed. If the seed changes, three files break at once — which is why the E2E global setup resets to the seed rather than creating its own fixtures, and why the smoke script asserts the catalogue is non-empty before Playwright runs.
+**One risk worth naming.** Task 7's specs address a seeded product by slug. The seeded slug is `smart-led-desk-lamp` — note that Plans 1 and 2 use a bare `desk-lamp` in their integration tests, but those *create* the product themselves rather than relying on the seed, so the two are unrelated and the resemblance is a trap. An e2e spec navigating to `/products/desk-lamp` gets a 404. If the seed changes, three files break at once — which is why the E2E global setup resets to the seed rather than creating its own fixtures, and why the smoke script asserts the catalogue is non-empty before Playwright runs.
