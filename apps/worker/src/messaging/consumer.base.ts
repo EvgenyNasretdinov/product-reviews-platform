@@ -103,9 +103,21 @@ export async function registerConsumer<E extends EventEnvelope = EventEnvelope>(
   const { consumerTag } = await channel.consume(queue, (msg: ConsumeMessage | null) => {
     if (!msg) return;
     inFlight += 1;
-    void handleDelivery(channel, queue, msg, handler).finally(() => {
-      inFlight -= 1;
-    });
+    handleDelivery(channel, queue, msg, handler)
+      .catch((error: unknown) => {
+        // handleDelivery's own try/catch already handles a parse failure
+        // or handler rejection by nacking — this only catches the case
+        // where the ack/nack call itself threw (see its own doc comment),
+        // which is the one failure this dispatcher must never let escape:
+        // an unhandled rejection here takes the whole worker process down.
+        forEvent({ queue }).error(
+          { err: describeError(error) },
+          `unhandled error dispatching a delivery on queue "${queue}"`,
+        );
+      })
+      .finally(() => {
+        inFlight -= 1;
+      });
   });
 
   return {
@@ -115,6 +127,47 @@ export async function registerConsumer<E extends EventEnvelope = EventEnvelope>(
       await channel.cancel(consumerTag);
     },
   };
+}
+
+/**
+ * `channel.ack`/`channel.nack` themselves — never `handler`, and never the
+ * envelope parse — are what {@link safeAck}/{@link safeNack} guard against
+ * throwing. In `amqplib@2.0.1`, once the channel is closed (an ordinary
+ * connection drop mid-delivery, or the documented drain-timeout path in
+ * `app.module.ts` closing the channel while a handler is still running),
+ * `sendImmediately` is replaced with `invalidOp`, so `channel.ack()`
+ * throws `IllegalOperationError` **synchronously** rather than rejecting.
+ * Left unguarded, that throw would land in whichever `catch` happens to
+ * be lexically around the call — for `ack`, that used to be the block
+ * that calls `channel.nack()` on handler failure, which would then throw
+ * the exact same way and escape `handleDelivery` entirely, taking the
+ * process down. A delivery that can't be acked or nacked because its
+ * channel is already gone is simply redelivered once a consumer
+ * reconnects — both `ModerationConsumer` and `AggregationConsumer` are
+ * built to be safe to redeliver — so swallowing the failure here (logged,
+ * not silent) is the correct outcome, not a bug being hidden.
+ */
+function safeAck(channel: ConfirmChannel, msg: ConsumeMessage, queue: string): void {
+  try {
+    channel.ack(msg);
+  } catch (error) {
+    forEvent({ queue }).warn(
+      { err: describeError(error) },
+      `ack failed on queue "${queue}" because its channel is already closed; the delivery will be redelivered`,
+    );
+  }
+}
+
+/** See {@link safeAck} — the same reasoning applies to `channel.nack`. */
+function safeNack(channel: ConfirmChannel, msg: ConsumeMessage, queue: string): void {
+  try {
+    channel.nack(msg, false, false);
+  } catch (error) {
+    forEvent({ queue }).warn(
+      { err: describeError(error) },
+      `nack failed on queue "${queue}" because its channel is already closed; the delivery will be redelivered`,
+    );
+  }
 }
 
 async function handleDelivery<E extends EventEnvelope>(
@@ -131,7 +184,7 @@ async function handleDelivery<E extends EventEnvelope>(
       { err: describeError(error) },
       `dead-lettering a message on queue "${queue}" that failed to parse`,
     );
-    channel.nack(msg, false, false);
+    safeNack(channel, msg, queue);
     return;
   }
 
@@ -139,13 +192,13 @@ async function handleDelivery<E extends EventEnvelope>(
 
   try {
     await handler(envelope as E);
-    channel.ack(msg);
+    safeAck(channel, msg, queue);
     log.info(`processed event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}"`);
   } catch (error) {
     log.error(
       { err: describeError(error) },
       `dead-lettering event ${envelope.eventId} (${envelope.eventType}) from queue "${queue}" after handler failure`,
     );
-    channel.nack(msg, false, false);
+    safeNack(channel, msg, queue);
   }
 }
