@@ -1,9 +1,19 @@
-// Idempotent seed data for local development and demos.
+// Seed data for local development and demos.
 //
-// Safe to run more than once: every write is keyed by a natural key (email,
-// slug, or a composite unique constraint) and goes through `upsert`, and the
-// rating summary is always recomputed from the review rows that exist at the
-// time the seed runs rather than incremented, so re-running never drifts.
+// Re-running this script restores the seeded baseline: every write is keyed
+// by a natural key (email, slug, or a composite unique constraint) and goes
+// through `upsert`, and product_rating_summary is always recomputed from
+// the review rows that exist at the time the seed runs rather than
+// incremented. It will not fail on unique-constraint errors.
+//
+// It does NOT preserve changes made through the app to a row it created.
+// If you approve the seeded FLAGGED review, click around, or otherwise edit
+// a seeded user/product/review, re-running this script overwrites that row
+// back to its baseline values. That is deliberate -- the main reason to
+// re-run this seed is to reset a demo database after clicking around in
+// it -- but it means this script is a reset-to-baseline, not a safe,
+// change-preserving sync. Rows this script did not create are never
+// touched.
 import { PrismaClient, type Role, type ReviewStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 

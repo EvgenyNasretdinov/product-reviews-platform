@@ -108,6 +108,7 @@ CREATE TABLE "product_rating_summary" (
     "count_3" INTEGER NOT NULL DEFAULT 0,
     "count_4" INTEGER NOT NULL DEFAULT 0,
     "count_5" INTEGER NOT NULL DEFAULT 0,
+    "updated_at" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "product_rating_summary_pkey" PRIMARY KEY ("product_id")
 );

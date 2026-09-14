@@ -39,18 +39,18 @@ model User {
 }
 
 model Product {
-  id          String     @id @default(uuid(7)) @db.Uuid
-  slug        String     @unique
+  id          String   @id @default(uuid(7)) @db.Uuid
+  slug        String   @unique
   name        String
   description String
-  priceCents  Int        @map("price_cents")
+  priceCents  Int      @map("price_cents")
   currency    String
-  imageUrl    String?    @map("image_url")
-  createdAt   DateTime   @default(now()) @map("created_at")
+  imageUrl    String?  @map("image_url")
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  reviews         Review[]
-  purchases       Purchase[]
-  ratingSummary   ProductRatingSummary?
+  reviews       Review[]
+  purchases     Purchase[]
+  ratingSummary ProductRatingSummary?
 
   @@map("products")
 }
@@ -108,15 +108,16 @@ model ReviewVote {
 }
 
 model ProductRatingSummary {
-  productId     String  @id @map("product_id") @db.Uuid
-  reviewCount   Int     @default(0) @map("review_count")
-  ratingSum     Int     @default(0) @map("rating_sum")
-  averageRating Decimal @default(0) @map("average_rating") @db.Decimal(3, 2)
-  count1        Int     @default(0) @map("count_1")
-  count2        Int     @default(0) @map("count_2")
-  count3        Int     @default(0) @map("count_3")
-  count4        Int     @default(0) @map("count_4")
-  count5        Int     @default(0) @map("count_5")
+  productId     String   @id @map("product_id") @db.Uuid
+  reviewCount   Int      @default(0) @map("review_count")
+  ratingSum     Int      @default(0) @map("rating_sum")
+  averageRating Decimal  @default(0) @map("average_rating") @db.Decimal(3, 2)
+  count1        Int      @default(0) @map("count_1")
+  count2        Int      @default(0) @map("count_2")
+  count3        Int      @default(0) @map("count_3")
+  count4        Int      @default(0) @map("count_4")
+  count5        Int      @default(0) @map("count_5")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
