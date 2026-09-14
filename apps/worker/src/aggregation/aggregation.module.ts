@@ -1,4 +1,4 @@
-import { Inject, Module, type OnModuleDestroy } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { CacheService } from '../cache/cache.service.js';
 import { RedisCacheService } from '../cache/redis-cache.service.js';
@@ -31,6 +31,19 @@ import { SummaryRepository } from './summary.repository.js';
  * on its own. It was optional for one task's duration, with the check
  * living here instead; now that the schema is the real gate, `env.redisUrl`
  * below is trusted rather than re-checked.
+ *
+ * `Redis` is exported (not just `AggregationConsumer`) so `AppModule`'s
+ * `PipelineLifecycle` can close it explicitly, last, alongside the AMQP
+ * connection and Prisma. This module does *not* implement `OnModuleDestroy`
+ * itself: Nest runs every provider's `onModuleDestroy` before any
+ * provider's `onApplicationShutdown` (see `AmqpConnection`'s and
+ * `PrismaService`'s doc comments for the same reasoning), so a hook here
+ * would disconnect Redis before the relay had stopped or the consumers had
+ * drained — and worse than a clean failure, `ioredis`'s default
+ * `enableOfflineQueue: true` means a command issued after `.disconnect()`
+ * neither resolves nor rejects, it just queues forever. A handler still
+ * mid-flight when that happened would hang, not fail, defeating the
+ * bounded drain this task exists to guarantee.
  */
 @Module({
   imports: [PrismaModule],
@@ -53,12 +66,6 @@ import { SummaryRepository } from './summary.repository.js';
       inject: [PrismaService, SummaryRepository, CacheService],
     },
   ],
-  exports: [AggregationConsumer],
+  exports: [AggregationConsumer, Redis],
 })
-export class AggregationModule implements OnModuleDestroy {
-  constructor(@Inject(Redis) private readonly redis: Redis) {}
-
-  onModuleDestroy(): void {
-    this.redis.disconnect();
-  }
-}
+export class AggregationModule {}

@@ -1,4 +1,5 @@
 import { Injectable, Module, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Redis } from 'ioredis';
 import { AggregationConsumer, type AggregationEvent } from './aggregation/aggregation.consumer.js';
 import { AggregationModule } from './aggregation/aggregation.module.js';
 import { PrismaService } from './common/prisma/prisma.service.js';
@@ -42,21 +43,27 @@ function sleep(ms: number): Promise<void> {
  *   3. wait, bounded by {@link DRAIN_TIMEOUT_MS}, for whatever delivery
  *      was already dispatched to each consumer to finish;
  *   4. only then close the channel and the connection;
- *   5. and only then disconnect Prisma.
+ *   5. and only then disconnect Redis and Prisma.
  *
  * This has to be one hook on one provider, not left to Nest's own
  * `OnModuleDestroy`/`OnApplicationShutdown` phases spread across
- * `AmqpConnection`, `OutboxRelayService`, and `PrismaService`
- * individually: Nest runs every provider's `onModuleDestroy` before any
- * provider's `onApplicationShutdown`, and *within* a phase the order
- * across independent providers depends on module-graph distance, not on
- * anything this pipeline can rely on. Getting the channel closed before
- * the relay had stopped (or before a consumer had drained) would nack
- * whatever was in flight and produce exactly the avoidable dead letters
- * on every deploy this task exists to prevent — see `AmqpConnection` and
- * `PrismaService`'s own doc comments for the same reasoning from their
- * side. Consolidating the whole sequence into this one hook is what makes
- * the order a guarantee instead of an accident of instantiation order.
+ * `AmqpConnection`, `OutboxRelayService`, `AggregationModule`'s `Redis`
+ * client, and `PrismaService` individually: Nest runs every provider's
+ * `onModuleDestroy` before any provider's `onApplicationShutdown`, and
+ * *within* a phase the order across independent providers depends on
+ * module-graph distance, not on anything this pipeline can rely on.
+ * Getting the channel (or Redis) closed before the relay had stopped (or
+ * before a consumer had drained) would nack whatever was in flight and
+ * produce exactly the avoidable dead letters on every deploy this task
+ * exists to prevent — worse for Redis specifically, since `ioredis`
+ * defaults `enableOfflineQueue: true`, so a command issued after
+ * `.disconnect()` neither resolves nor rejects, it just queues forever;
+ * a handler caught in that window would hang the drain for its full
+ * timeout instead of failing cleanly. See `AmqpConnection`,
+ * `PrismaService`, and `AggregationModule`'s own doc comments for the
+ * same reasoning from their side. Consolidating the whole sequence into
+ * this one hook is what makes the order a guarantee instead of an
+ * accident of instantiation order.
  */
 @Injectable()
 class PipelineLifecycle implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -69,6 +76,7 @@ class PipelineLifecycle implements OnApplicationBootstrap, OnApplicationShutdown
     private readonly moderationConsumer: ModerationConsumer,
     private readonly aggregationConsumer: AggregationConsumer,
     private readonly prisma: PrismaService,
+    private readonly redis: Redis,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -105,8 +113,14 @@ class PipelineLifecycle implements OnApplicationBootstrap, OnApplicationShutdown
     // 4. Only now close the channel and the connection.
     await this.amqp.close();
 
-    // 5. And only now disconnect Prisma — the consumers drained in step 3
-    // may still have been querying it.
+    // 5. And only now disconnect Redis and Prisma — the consumers
+    // drained in step 3 may still have been querying either of them.
+    // `Redis#disconnect()` is synchronous (it never rejects), so there is
+    // nothing to await, but it still has to happen after the drain for
+    // the same reason `amqp.close()` does: closing it earlier is what let
+    // a handler hang forever instead of failing — see the class doc
+    // comment and `AggregationModule`'s.
+    this.redis.disconnect();
     await this.prisma.$disconnect();
   }
 

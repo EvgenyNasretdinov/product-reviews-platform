@@ -9,7 +9,7 @@ import { TOPOLOGY } from '../src/messaging/topology.js';
  * Everything else in this suite bypasses `AppModule`/`AmqpConnection`
  * entirely: `test/harness.ts` opens its own raw `amqplib` connection and
  * hands `EventPublisher` a bare `{ getChannel }` stub, so a bug in
- * `AmqpConnection.connect()`, `onModuleDestroy()`, or the real DI wiring
+ * `AmqpConnection.connect()`, `close()`, or the real DI wiring
  * between `ConfigModule` and `MessagingModule` would pass every other
  * test in this package while the worker still couldn't boot. Plan 1 had
  * exactly this shape of gap — a circular import that broke every boot
