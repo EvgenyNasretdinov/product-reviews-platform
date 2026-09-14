@@ -1,7 +1,8 @@
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { EVENT_TYPES } from '@reviews/contracts';
 import { execSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createPrismaClient } from '../src/index.js';
+import { createPrismaClient, OutboxValidationError, writeOutboxEvent } from '../src/index.js';
 import type { PrismaClient } from '../src/index.js';
 
 let container: StartedPostgreSqlContainer;
@@ -98,5 +99,42 @@ describe('outbox table', () => {
       data: { aggregateType: 'review', aggregateId: product.id, eventType: 'review.submitted', payload: {} },
     });
     expect(b.id > a.id).toBe(true);
+  });
+});
+
+/**
+ * A mocked `tx` (see `src/outbox.test.ts`) can prove `writeOutboxEvent`
+ * validates *before* attempting its own insert, but it cannot prove
+ * anything about what happens to a write that ran earlier in the *same*
+ * transaction — a mock has no rollback semantics to observe. This suite
+ * runs `writeOutboxEvent` against a real transaction, alongside a real
+ * preceding write, specifically to close that gap: an implementation that
+ * moved the outbox write into a second, separate transaction gated on the
+ * first one's success would satisfy every mocked unit test and even
+ * `review-submission.integration.test.ts`'s "no outbox event on conflict"
+ * case (nothing in that case exercises the *success* path failing), yet
+ * fail this one, because the first transaction's write would already be
+ * committed by the time the second transaction rejects it.
+ */
+describe('writeOutboxEvent transactional integrity', () => {
+  it('rolls back a preceding write in the same transaction when the outbox payload fails validation', async () => {
+    const { user, product } = await seedProductAndUser();
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        await tx.review.create({ data: { productId: product.id, authorId: user.id, rating: 5, title: 't', body: 'b' } });
+        // `{}` satisfies no event payload schema — every required field of
+        // reviewSubmittedPayloadSchema is missing — so writeOutboxEvent
+        // rejects it before attempting its own insert.
+        await writeOutboxEvent(tx, {
+          eventType: EVENT_TYPES.REVIEW_SUBMITTED,
+          aggregateId: product.id,
+          payload: {},
+        });
+      }),
+    ).rejects.toThrow(OutboxValidationError);
+
+    expect(await prisma.review.count({ where: { productId: product.id, authorId: user.id } })).toBe(0);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: product.id } })).toBe(0);
   });
 });

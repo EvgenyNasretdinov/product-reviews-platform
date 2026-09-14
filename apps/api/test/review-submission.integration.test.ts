@@ -172,10 +172,16 @@ describe('POST /api/v1/products/:productId/reviews', () => {
     await submit(randomUUID(), token).expect(404);
   });
 
-  // Case 8, race safety: the not-found check must not race a concurrent
-  // insert. Two submissions for the same missing product should both 404,
-  // never one 404 and one 500 from an FK violation.
-  it('answers 404 for concurrent submissions against the same missing product', async () => {
+  // Case 8, extra: two simultaneously in-flight requests for the same
+  // never-existed product both resolve 404. This is not a test of the
+  // check-then-insert race itself — no product is ever created or deleted
+  // here, so both transactions fail the same `tx.product.findUnique` lookup
+  // regardless of isolation level or timing. What it does check is that
+  // issuing two requests concurrently doesn't trip something unrelated
+  // (e.g. two interactive transactions contending on the same connection
+  // pool, or an unhandled promise rejection surfacing as a 500) — a
+  // narrower, but still real, property than "race-safe".
+  it('answers 404 for two simultaneously in-flight submissions against a product that never existed', async () => {
     const token = await ctx.loginAs('alice@example.com');
     const missingProductId = randomUUID();
 

@@ -31,6 +31,18 @@ export class ProductNotFoundError extends Error {
 /**
  * Owns every Prisma call the reviews-submission flow makes.
  * `ReviewsService` and `ReviewsController` never see a Prisma type.
+ *
+ * Atomicity lives at the level of one method's own `this.prisma.$transaction`
+ * call, not at the level of this class or of `ReviewsService`: there is no
+ * shared `tx` handle a caller can thread across two separate repository
+ * calls, so `service.methodA()` followed by `service.methodB()` never
+ * shares a transaction no matter how they're composed above this layer. If
+ * a future change needs two writes to succeed or fail together — the same
+ * property `submit` relies on for the review row and its outbox event —
+ * both writes belong inside one repository method, in one `$transaction`
+ * call, the way `submit` does it below. Splitting them across two
+ * repository methods and calling both from the service looks identical at
+ * the type level but silently gives up atomicity.
  */
 @Injectable()
 export class ReviewsRepository {
