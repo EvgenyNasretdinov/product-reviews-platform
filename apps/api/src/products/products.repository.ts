@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma, Product, ProductRatingSummary } from '@reviews/db';
+import { parseCursorDate } from '../common/pagination/cursor.js';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
 /** A product row joined with its (possibly absent) materialised rating summary. */
@@ -55,7 +56,15 @@ export class ProductsRepository {
       });
     }
     if (cursor) {
-      const cursorDate = new Date(cursor.key);
+      // Unvalidated, `new Date(cursor.key)` on a malformed key produces an
+      // Invalid Date that reaches Prisma's serialiser and throws
+      // `RangeError: Invalid time value` — not an `HttpException`, not a
+      // Prisma error, so it falls through the global exception filter to a
+      // 500 on this public, unauthenticated endpoint. `parseCursorDate`
+      // rejects it as a 400 instead — see its doc comment in cursor.ts, and
+      // `ReviewsRepository.listApproved`'s identical use for the reference
+      // case this was carried over from.
+      const cursorDate = parseCursorDate(cursor.key);
       conditions.push({
         OR: [{ createdAt: { lt: cursorDate } }, { createdAt: cursorDate, id: { lt: cursor.id } }],
       });

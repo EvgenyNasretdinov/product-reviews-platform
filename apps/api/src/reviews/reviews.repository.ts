@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EVENT_TYPES, type ReviewSort, type VoteValue } from '@reviews/contracts';
 import { Prisma, writeOutboxEvent, type Review, type ReviewStatus, type Role } from '@reviews/db';
+import { parseCursorDate, parseCursorNumber } from '../common/pagination/cursor.js';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 
 /** A review row joined with the author fields the DTO exposes. */
@@ -53,35 +54,6 @@ const SORTS: Record<ReviewSort, SortDefinition> = {
 export function cursorKeyFor(sort: ReviewSort, row: Review): string | number {
   const value = row[SORTS[sort].column];
   return value instanceof Date ? value.toISOString() : value;
-}
-
-/**
- * Parses a cursor key as the number a `helpfulCount`/`rating` cursor must
- * carry. `decodeCursor` only checks that the key is a non-empty string —
- * scope is what it validates — so a cursor with a correct, matching scope
- * but a garbage key (`"abc"`) still has to be rejected here, with the same
- * `BadRequestException` a scope mismatch gets. Left unchecked, `Number()`
- * would hand Prisma a `NaN` bound, which reaches Postgres, misses every
- * known-error branch in the global exception filter, and 500s — for a
- * public endpoint taking attacker-controlled query-string input, that is
- * exactly the "arbitrary server error instead of a clean client error"
- * outcome the scope check exists to avoid.
- */
-function parseCursorNumber(key: string): number {
-  const value = Number(key);
-  if (Number.isNaN(value)) {
-    throw new BadRequestException('invalid cursor');
-  }
-  return value;
-}
-
-/** As {@link parseCursorNumber}, for a `createdAt` cursor's date key. */
-function parseCursorDate(key: string): Date {
-  const value = new Date(key);
-  if (Number.isNaN(value.getTime())) {
-    throw new BadRequestException('invalid cursor');
-  }
-  return value;
 }
 
 /**

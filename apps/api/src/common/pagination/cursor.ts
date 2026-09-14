@@ -22,9 +22,17 @@ import { z } from 'zod';
  * readable composite, so the sort key can change later without becoming a
  * public API contract.
  */
+// `id` is validated as a UUID, not just a non-empty string: every cursor
+// producer in this codebase mints it from a row's own `id` column, which is
+// `@db.Uuid` in every table a cursor paginates (products, reviews). A
+// syntactically-valid-JSON cursor carrying a non-UUID id would otherwise
+// reach that column as a Postgres `::uuid` comparison and raise `P2023`,
+// which the global exception filter doesn't map — a public, unauthenticated
+// listing endpoint would 500 on attacker-controlled input instead of
+// answering the 400 a malformed cursor actually warrants.
 const cursorPayloadSchema = z.object({
   key: z.string().min(1),
-  id: z.string().min(1),
+  id: z.string().uuid(),
   scope: z.string().min(1),
 });
 
@@ -46,4 +54,39 @@ export function decodeCursor(cursor: string, expectedScope: string): { key: stri
   } catch {
     throw new BadRequestException('invalid cursor');
   }
+}
+
+/**
+ * Parses a cursor key as the number a numeric-column cursor (review
+ * `helpfulCount`/`rating`) must carry. `decodeCursor` only checks that the
+ * key is a non-empty string — scope is what it validates — so a cursor with
+ * a correct, matching scope but a garbage key (`"abc"`) still has to be
+ * rejected here, with the same `BadRequestException` a scope mismatch gets.
+ * Left unchecked, `Number()` would hand Prisma a `NaN` bound, which reaches
+ * Postgres, misses every known-error branch in the global exception filter,
+ * and 500s — for a public endpoint taking attacker-controlled query-string
+ * input, that is exactly the "arbitrary server error instead of a clean
+ * client error" outcome the scope check exists to avoid.
+ *
+ * Shared by every repository that paginates by a numeric or date column
+ * (`ReviewsRepository`, `ProductsRepository`) — see {@link parseCursorDate}
+ * for the date-column counterpart, and this file's own header comment for
+ * why both live alongside the cursor codec rather than in either
+ * repository.
+ */
+export function parseCursorNumber(key: string): number {
+  const value = Number(key);
+  if (Number.isNaN(value)) {
+    throw new BadRequestException('invalid cursor');
+  }
+  return value;
+}
+
+/** As {@link parseCursorNumber}, for a `createdAt`-column cursor's date key. */
+export function parseCursorDate(key: string): Date {
+  const value = new Date(key);
+  if (Number.isNaN(value.getTime())) {
+    throw new BadRequestException('invalid cursor');
+  }
+  return value;
 }

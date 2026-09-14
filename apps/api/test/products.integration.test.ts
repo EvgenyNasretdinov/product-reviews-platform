@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import type { ProductDetailDto, RatingSummaryDto } from '@reviews/contracts';
 import { describe, expect, it } from 'vitest';
 import { createProduct, createReview, createSummary, createUser } from './fixtures.js';
 import { setupTestApp } from './harness.js';
+import { encodeCursor } from '../src/common/pagination/cursor.js';
 
 // supertest's Response#body is typed `any`; every test below narrows it
 // through these shapes once instead of sprinkling eslint-disable comments
@@ -183,6 +185,29 @@ describe('GET /api/v1/products', () => {
   // Case 9.
   it('rejects limit=500 with 400', async () => {
     await ctx.request.get('/api/v1/products?limit=500').expect(400);
+  });
+
+  // Regression: an unvalidated `new Date(cursor.key)` on a malformed key
+  // produces an Invalid Date, which reaches Prisma's serialiser and throws
+  // `RangeError: Invalid time value` — not an `HttpException`, not a
+  // Prisma error, so it falls through the global exception filter to a 500
+  // on this public, unauthenticated endpoint. The identical bug was found
+  // and fixed for the review listing (see review-listing.integration.test.ts's
+  // "rejects a cursor with an unparseable date key"); this is the same
+  // fix carried over to the product list.
+  it('rejects a cursor with an unparseable date key with 400', async () => {
+    const garbageCursor = encodeCursor('not-a-date', randomUUID(), 'products');
+
+    await ctx.request.get(`/api/v1/products?cursor=${garbageCursor}`).expect(400);
+  });
+
+  // Regression: a validly-scoped cursor whose `id` isn't a UUID reaches a
+  // `@db.Uuid` comparison and raises Prisma's unmapped P2023 (500) instead
+  // of the 400 a malformed client-supplied cursor warrants.
+  it('rejects a cursor whose id is not a UUID with 400', async () => {
+    const garbageCursor = encodeCursor(new Date().toISOString(), 'not-a-uuid', 'products');
+
+    await ctx.request.get(`/api/v1/products?cursor=${garbageCursor}`).expect(400);
   });
 });
 
