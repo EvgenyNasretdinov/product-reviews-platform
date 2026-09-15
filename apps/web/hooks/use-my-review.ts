@@ -14,11 +14,12 @@ export function myReviewQueryKey(productId: string): readonly unknown[] {
  * Goes through `/api/me/reviews`, a Route Handler
  * (app/api/me/reviews/route.ts), for the same reason `useSubmitReview`
  * proxies the POST: the bearer token lives only in the httpOnly `session`
- * cookie, which this browser code cannot read. The route accepts
- * `?productId=` and does the "does the caller have a review for this one
- * product" search server-side, since `GET /me/reviews` itself has no
- * `productId` filter — see that route's own doc comment for how it
- * narrows an unbounded, newest-first history down to one match.
+ * cookie, which this browser code cannot read. The route forwards
+ * `?productId=` straight through to `GET /me/reviews`, which filters on
+ * it itself (see `MyReviewsController#listMine` on the API) — at most one
+ * review can ever match, since `UNIQUE(product_id, author_id)` means an
+ * author has at most one review per product, so `items[0]` below is
+ * either that review or nothing.
  */
 async function fetchMyReviewForProduct(productId: string): Promise<ReviewDto | null> {
   const response = await fetch(`/api/me/reviews?productId=${encodeURIComponent(productId)}`);
