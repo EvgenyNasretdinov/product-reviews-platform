@@ -118,6 +118,20 @@ export interface VoteCounts {
 }
 
 /**
+ * `VoteCounts` plus the id of the product the voted-on review belongs to.
+ * `castVote` already reads this off the same locked row it checks
+ * `status`/`authorId` on — this is that field, surfaced rather than
+ * dropped, so `VotesService` can invalidate the product's review-list
+ * cache without a second query. Never returned to an HTTP caller as-is:
+ * `VotesController#vote` still only ever sends `VoteCounts`'s two fields
+ * (see `VoteCountsResponseDto`) — `productId` is for `VotesService`'s own
+ * use, not part of the public response shape.
+ */
+export interface VoteMutationResult extends VoteCounts {
+  productId: string;
+}
+
+/**
  * Thrown from inside {@link ReviewsRepository.submit}'s transaction when
  * `productId` doesn't reference a real product. Deliberately a plain
  * `Error`, not a NestJS `HttpException`: this repository owns every Prisma
@@ -401,7 +415,7 @@ export class ReviewsRepository {
    * {@link lockReviewRow}'s doc comment for why acquiring it afterward
    * deadlocks under concurrency instead of merely serialising.
    */
-  async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteCounts> {
+  async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteMutationResult> {
     return this.prisma.$transaction(async (tx) => {
       const review = await lockReviewRow(tx, reviewId);
       if (!review || review.status !== 'APPROVED') {
@@ -417,7 +431,13 @@ export class ReviewsRepository {
         update: { value },
       });
 
-      return recomputeVoteCounts(tx, reviewId);
+      const counts = await recomputeVoteCounts(tx, reviewId);
+      // `review.productId` is the same locked row already read above for
+      // the status/author checks — surfaced here rather than re-queried,
+      // so `VotesService` can invalidate that product's review-list cache
+      // (see its doc comment) without a second round trip to find out
+      // which product this review even belongs to.
+      return { ...counts, productId: review.productId };
     });
   }
 
@@ -435,15 +455,21 @@ export class ReviewsRepository {
    * `204` unconditionally rather than surfacing a 404 here. `deleteMany`
    * (not `delete`) is what makes the "no such vote" case a no-op instead of
    * Prisma's `P2025`.
+   *
+   * Returns the locked row's `productId` so `VotesService` can invalidate
+   * that product's review-list cache the same way `castVote` does — or
+   * `null` when `reviewId` matched no row at all, the one case where
+   * there is no product, and nothing changed, to invalidate for.
    */
-  async removeVote(reviewId: string, userId: string): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      // The locked row's fields aren't needed here — removeVote never
-      // checks the review's status or author (see this method's own doc
-      // comment above) — so the return value is discarded.
-      await lockReviewRow(tx, reviewId);
+  async removeVote(reviewId: string, userId: string): Promise<string | null> {
+    return this.prisma.$transaction(async (tx) => {
+      // The locked row's status/author aren't needed here — removeVote
+      // never checks either (see this method's own doc comment above) —
+      // only `productId` is, for the cache invalidation described above.
+      const review = await lockReviewRow(tx, reviewId);
       await tx.reviewVote.deleteMany({ where: { reviewId, userId } });
       await recomputeVoteCounts(tx, reviewId);
+      return review?.productId ?? null;
     });
   }
 
