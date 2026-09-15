@@ -1,6 +1,10 @@
+'use client';
+
 import type { ReactNode } from 'react';
 import type { ReviewDto } from '@reviews/contracts';
 import { RatingStars } from '@/components/rating-stars';
+import { VoteButtons } from '@/components/vote-buttons';
+import { useVote } from '@/hooks/use-vote';
 
 /**
  * `ReviewDto` minus `moderationReason` — the type this component actually
@@ -22,6 +26,8 @@ export type PublicReview = Omit<ReviewDto, 'moderationReason'>;
 
 interface ReviewItemProps {
   review: PublicReview;
+  /** The signed-in caller's id, or `null` when signed out. Used only to derive `canVote`/`isSignedIn` for `VoteButtons` below — never to widen what this component reads off `review` itself. */
+  currentUserId: string | null;
 }
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'long' });
@@ -31,13 +37,24 @@ function formatDate(date: Date): string {
 }
 
 /**
- * The helpfulness counts render as plain read-only numbers here rather
- * than as an interactive control: the vote button and its optimistic
- * update belong to `VoteButtons`/`useVote`, a separate component this
- * task does not build. Once added, it slots in next to these counts
- * without this component's own layout changing.
+ * Renders one review, with `VoteButtons`/`useVote` wired in for its
+ * helpfulness counts (previously a plain read-only number in this slot —
+ * see this file's git history for the version that comment described).
+ * `useVote` is called here rather than inside `VoteButtons` itself so that
+ * component's own tests can render it with a bare mock `onVote` and no
+ * `QueryClientProvider` at all — see vote-buttons.tsx's doc comment.
+ *
+ * `canVote` mirrors the server's own rule (`VotesController#vote`'s 403):
+ * signed in and not this review's own author. It is computed here, from
+ * `currentUserId`, rather than left for a 403 to communicate after the
+ * fact — a control that looks available and then errors on click is worse
+ * than one that explains itself up front.
  */
-export function ReviewItem({ review }: ReviewItemProps): ReactNode {
+export function ReviewItem({ review, currentUserId }: ReviewItemProps): ReactNode {
+  const vote = useVote(review.id, review.productId);
+  const isSignedIn = currentUserId !== null;
+  const canVote = isSignedIn && currentUserId !== review.author.id;
+
   return (
     <li className="flex flex-col gap-2 border-b border-border py-6 last:border-b-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -58,11 +75,14 @@ export function ReviewItem({ review }: ReviewItemProps): ReactNode {
 
       <p className="text-sm text-foreground/90">{review.body}</p>
 
-      {review.helpfulCount + review.notHelpfulCount > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          {review.helpfulCount} of {review.helpfulCount + review.notHelpfulCount} found this helpful
-        </p>
-      ) : null}
+      <VoteButtons
+        reviewId={review.id}
+        helpfulCount={review.helpfulCount}
+        notHelpfulCount={review.notHelpfulCount}
+        canVote={canVote}
+        isSignedIn={isSignedIn}
+        onVote={(value, previousVote) => vote.mutateAsync({ value, previousValue: previousVote })}
+      />
     </li>
   );
 }

@@ -14,6 +14,8 @@ import { ApiError } from '@/lib/errors';
 interface ReviewListProps {
   productId: string;
   summary: RatingSummaryData;
+  /** The signed-in caller's id, or `null` when signed out — threaded straight through to `ReviewItem`, which needs it to derive `VoteButtons`' `canVote`/`isSignedIn`. */
+  currentUserId: string | null;
 }
 
 const DEFAULT_SORT: ReviewSort = 'helpful';
@@ -63,7 +65,7 @@ function Spinner(): ReactNode {
  * false })`, so a filtered view is shareable and the back button steps
  * through it without the page jumping to the top on every change.
  */
-export function ReviewList({ productId, summary }: ReviewListProps): ReactNode {
+export function ReviewList({ productId, summary, currentUserId }: ReviewListProps): ReactNode {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -156,7 +158,7 @@ export function ReviewList({ productId, summary }: ReviewListProps): ReactNode {
         <>
           <ul>
             {items.map((review) => (
-              <ReviewItem key={review.id} review={review} />
+              <ReviewItem key={review.id} review={review} currentUserId={currentUserId} />
             ))}
           </ul>
           {hasNextPage ? (

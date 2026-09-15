@@ -112,7 +112,7 @@ export default async function ProductPage({ params }: ProductPageProps): Promise
 
         <WriteReviewSection productId={product.id} isSignedIn={user !== null} />
 
-        <ReviewList productId={product.id} summary={product.summary} />
+        <ReviewList productId={product.id} summary={product.summary} currentUserId={user?.id ?? null} />
       </main>
     </div>
   );
