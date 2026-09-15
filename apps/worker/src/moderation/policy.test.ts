@@ -28,8 +28,22 @@ describe('defaultPolicy', () => {
     expect(verdict.reason).toMatch(/link/i);
   });
 
-  it('flags shouting rather than rejecting it', () => {
-    expect(classify({ body: 'ABSOLUTELY TERRIBLE DO NOT BUY THIS EVER AGAIN' }).decision).toBe('FLAGGED');
+  // This exact string is what the README's walkthrough tells a reader to
+  // paste in order to watch automatic moderation work. The first version
+  // of that walkthrough suggested a 33-character one, which is under
+  // CAPS_MIN_LENGTH and therefore approved — the walkthrough demonstrated
+  // nothing, and said so nowhere. Pinning the string here is what makes a
+  // retuned threshold fail in this file instead of in someone's first ten
+  // minutes with the project.
+  it('flags shouting rather than rejecting it, using the README\'s own example', () => {
+    const readmeExample = 'ABSOLUTELY TERRIBLE DO NOT BUY THIS EVER AGAIN';
+    expect(readmeExample.length).toBeGreaterThan(40);
+    expect(classify({ body: readmeExample }).decision).toBe('FLAGGED');
+  });
+
+  it('leaves a short burst of capitals alone, so acronyms are not shouting', () => {
+    expect(classify({ body: 'SUPER BADD' }).decision).toBe('APPROVED');
+    expect(classify({ body: 'Battery life on the MBP with USB-C is great.' }).decision).toBe('APPROVED');
   });
 
   it('flags a review duplicated from the same author', () => {

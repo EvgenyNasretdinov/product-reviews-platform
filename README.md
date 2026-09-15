@@ -87,11 +87,19 @@ With the stack running from the quick start above:
 2. **Submit one in capitals and find it in the moderator queue.** Sign in as
    `bob@example.com` and open the [Nonstick Ceramic Cookware
    Set](http://localhost:3000/products/nonstick-ceramic-cookware-set) —
-   the seed doesn't give him a review there either. Submit something like
-   `"THIS IS TERRIBLE, I WANT A REFUND"`. The automatic classifier flags
-   excessive uppercase; the review lands in `FLAGGED`, not `PENDING`, and
-   shows up for `mod@example.com` at http://localhost:3000/moderation with
-   the reason attached.
+   the seed doesn't give him a review there either. Paste
+   `ABSOLUTELY TERRIBLE DO NOT BUY THIS EVER AGAIN` as the body. The
+   automatic classifier flags excessive uppercase; the review lands in
+   `FLAGGED`, not `PENDING`, and shows up for `mod@example.com` at
+   http://localhost:3000/moderation with the reason attached.
+
+   Length matters here, and the rule is deliberately built that way: it
+   ignores anything at or under 40 characters, so `"SO BAD"` and other
+   short bursts of capitals stay approved. Measuring the ratio on a very
+   short string mostly detects acronyms — a review mentioning USB-C and
+   an MBP would otherwise read as shouting. The rule also looks only at
+   the body, so a screaming title alone will not trip it.
+   `apps/worker/src/moderation/policy.ts` holds the thresholds.
 3. **Open the RabbitMQ management UI** (http://localhost:15672, `guest` /
    `guest`) and watch the `moderation.review-submitted` and
    `aggregation.review-visibility` queues while you submit reviews — message
