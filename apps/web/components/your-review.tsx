@@ -31,6 +31,7 @@ export function YourReview({ review }: YourReviewProps): ReactNode {
   return (
     <section
       aria-label="Your review"
+      data-testid="your-review"
       className="flex flex-col gap-3 rounded-lg border border-border bg-secondary/40 p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">

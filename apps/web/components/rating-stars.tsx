@@ -25,6 +25,14 @@ export interface RatingStarsProps {
   count?: number;
   size?: RatingStarsSize;
   className?: string;
+  /**
+   * Opt-in `data-testid`, left unset by every caller except `ReviewItem`
+   * (`review-rating`) — the one place an e2e spec needs to find *each
+   * review's own* stars specifically, as opposed to the header's or
+   * `RatingSummary`'s, which render the exact same markup shape and would
+   * otherwise be indistinguishable from it by role/label alone.
+   */
+  testId?: string;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -69,7 +77,7 @@ function Star({ fillPercent }: { fillPercent: number }): ReactNode {
  * with no text is silence to a screen reader, and rendering "no reviews"
  * as zero filled stars reads as a one-star product to everyone else.
  */
-export function RatingStars({ value, count, size = 'md', className }: RatingStarsProps): ReactNode {
+export function RatingStars({ value, count, size = 'md', className, testId }: RatingStarsProps): ReactNode {
   const clampedValue = clamp(value, 0, 5);
   const isUnrated = count === 0;
   const label = describeRating(clampedValue, count);
@@ -78,6 +86,7 @@ export function RatingStars({ value, count, size = 'md', className }: RatingStar
     <span
       role="img"
       aria-label={label}
+      data-testid={testId}
       className={cn('inline-flex items-center', SIZE_CLASSES[size], className)}
     >
       {STAR_INDEXES.map((index) => (

@@ -90,6 +90,8 @@ export default async function HomePage({ searchParams }: HomePageProps): Promise
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-8">
+        <h1 className="mb-6 text-2xl font-semibold">Products</h1>
+
         <div className="mb-8 max-w-md">
           <SearchField defaultValue={query} />
         </div>

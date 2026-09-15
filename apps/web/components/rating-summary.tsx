@@ -36,10 +36,19 @@ export function RatingSummary({ summary, onFilter, activeFilter }: RatingSummary
   const { reviewCount, averageRating, distribution } = summary;
 
   return (
-    <section aria-label="Rating summary" className="flex flex-col gap-4 sm:flex-row sm:items-start sm:gap-8">
+    <section
+      aria-label="Rating summary"
+      data-testid="rating-summary"
+      className="flex flex-col gap-4 sm:flex-row sm:items-start sm:gap-8"
+    >
       <div className="flex flex-col items-start gap-1">
         <span className="text-3xl font-semibold">{reviewCount === 0 ? '—' : averageRating.toFixed(2)}</span>
         <RatingStars value={averageRating} count={reviewCount} size="lg" />
+        {/* The star row's rating/count is otherwise only readable from its
+            aria-label — real information for a screen reader, but nothing
+            a sighted visitor can actually see printed anywhere. This is
+            the one place that count is rendered as plain visible text. */}
+        {reviewCount > 0 ? <span className="text-sm text-muted-foreground">{reviewsLabel(reviewCount)}</span> : null}
       </div>
 
       {reviewCount === 0 ? (

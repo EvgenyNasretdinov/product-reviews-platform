@@ -56,9 +56,9 @@ export function ReviewItem({ review, currentUserId }: ReviewItemProps): ReactNod
   const canVote = isSignedIn && currentUserId !== review.author.id;
 
   return (
-    <li className="flex flex-col gap-2 border-b border-border py-6 last:border-b-0">
+    <li data-testid="review-item" className="flex flex-col gap-2 border-b border-border py-6 last:border-b-0">
       <div className="flex flex-wrap items-center gap-2">
-        <RatingStars value={review.rating} size="sm" />
+        <RatingStars value={review.rating} size="sm" testId="review-rating" />
         <h3 className="text-sm font-semibold">{review.title}</h3>
       </div>
 

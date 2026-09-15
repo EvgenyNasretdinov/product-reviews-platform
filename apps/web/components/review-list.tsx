@@ -121,56 +121,69 @@ export function ReviewList({ productId, summary, currentUserId }: ReviewListProp
         </div>
       ) : null}
 
-      {isPending ? (
-        <ul>
-          <ReviewSkeleton />
-          <ReviewSkeleton />
-          <ReviewSkeleton />
-        </ul>
-      ) : isError ? (
-        <EmptyState
-          title="Couldn't load reviews"
-          description={error instanceof ApiError ? error.message : 'Something went wrong. Please try again.'}
-          action={
-            <Button type="button" variant="outline" onClick={() => void refetch()}>
-              Try again
-            </Button>
-          }
-        />
-      ) : items.length === 0 ? (
-        rating !== null ? (
-          // Distinguished from the "no reviews yet" case below: the
-          // product does have reviews, just none at this star rating —
-          // the fix is to widen the filter, not to write the first review.
+      {/* A stable container for the list region itself — present in every
+          state (loading, error, empty, populated) rather than only once
+          items exist, so an e2e assertion that a review is *absent* here
+          (the moderation-gate check no unit test can make) has something
+          to query against before that review is ever approved, not just
+          after. */}
+      <div data-testid="review-list">
+        {isPending ? (
+          <ul>
+            <ReviewSkeleton />
+            <ReviewSkeleton />
+            <ReviewSkeleton />
+          </ul>
+        ) : isError ? (
           <EmptyState
-            title={`No ${rating}-star reviews`}
-            description="No reviews match this filter. Clear it to see every review."
+            title="Couldn't load reviews"
+            description={error instanceof ApiError ? error.message : 'Something went wrong. Please try again.'}
             action={
-              <Button type="button" variant="outline" onClick={() => updateParams({ rating: null })}>
-                Clear filter
+              <Button type="button" variant="outline" onClick={() => void refetch()}>
+                Try again
               </Button>
             }
           />
+        ) : items.length === 0 ? (
+          rating !== null ? (
+            // Distinguished from the "no reviews yet" case below: the
+            // product does have reviews, just none at this star rating —
+            // the fix is to widen the filter, not to write the first review.
+            <EmptyState
+              title={`No ${rating}-star reviews`}
+              description="No reviews match this filter. Clear it to see every review."
+              action={
+                <Button type="button" variant="outline" onClick={() => updateParams({ rating: null })}>
+                  Clear filter
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState title="No reviews yet" description="Be the first to share what you think of this product." />
+          )
         ) : (
-          <EmptyState title="No reviews yet" description="Be the first to share what you think of this product." />
-        )
-      ) : (
-        <>
-          <ul>
-            {items.map((review) => (
-              <ReviewItem key={review.id} review={review} currentUserId={currentUserId} />
-            ))}
-          </ul>
-          {hasNextPage ? (
-            <div className="flex justify-center">
-              <Button type="button" variant="outline" onClick={() => void fetchNextPage()} disabled={isFetchingNextPage}>
-                {isFetchingNextPage ? <Spinner /> : null}
-                {isFetchingNextPage ? 'Loading…' : 'Load more'}
-              </Button>
-            </div>
-          ) : null}
-        </>
-      )}
+          <>
+            <ul>
+              {items.map((review) => (
+                <ReviewItem key={review.id} review={review} currentUserId={currentUserId} />
+              ))}
+            </ul>
+            {hasNextPage ? (
+              <div className="flex justify-center">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                >
+                  {isFetchingNextPage ? <Spinner /> : null}
+                  {isFetchingNextPage ? 'Loading…' : 'Load more'}
+                </Button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
     </section>
   );
 }

@@ -10,7 +10,8 @@
     "start": "next start",
     "start:dev": "next dev",
     "pretest:unit": "test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build",
-    "test:unit": "vitest run --config vitest.config.ts"
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.9.1",
@@ -30,6 +31,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@reviews/tooling": "workspace:*",
     "@tailwindcss/postcss": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
