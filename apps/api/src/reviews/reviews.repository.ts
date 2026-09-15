@@ -218,6 +218,8 @@ export interface ModerationQueuePage {
 
 export interface ListByAuthorParams {
   authorId: string;
+  /** Narrows to one product's review — see {@link listByAuthor}'s doc comment. */
+  productId?: string;
   limit: number;
   cursor?: { key: string; id: string };
 }
@@ -562,12 +564,19 @@ export class ReviewsRepository {
   /**
    * Keyset pagination over every review `params.authorId` has written, in
    * every status, newest first — the backing query for `GET /me/reviews`.
-   * No `productId` filter and no `status: 'APPROVED'` filter: unlike
-   * {@link listApproved}, this is the author reading their own work, so a
-   * `PENDING`/`REJECTED`/`FLAGGED` row (and, on a rejected one, its
-   * `moderationReason`) is exactly what should come back — see
-   * reviews.mapper.ts's `toReviewDto` vs `toPublicReviewDto` for the two
-   * paths this deliberately keeps apart.
+   * No `status: 'APPROVED'` filter: unlike {@link listApproved}, this is
+   * the author reading their own work, so a `PENDING`/`REJECTED`/`FLAGGED`
+   * row (and, on a rejected one, its `moderationReason`) is exactly what
+   * should come back — see reviews.mapper.ts's `toReviewDto` vs
+   * `toPublicReviewDto` for the two paths this deliberately keeps apart.
+   *
+   * `params.productId`, when given, narrows this to the caller's review of
+   * one product — the "have I already reviewed this?" question the web
+   * app's product page asks. It's one more predicate in the same `AND`,
+   * not a second query path: `UNIQUE(product_id, author_id)` means at most
+   * one row can ever match both, so this never returns more than one item
+   * when `productId` is set, but the response shape (and its cursor) stays
+   * identical to the unfiltered call either way.
    *
    * Reuses `SORTS.newest`'s `orderBy` and `cursorWhere('newest', …)`'s
    * `WHERE` fragment, the same way {@link listQueue} does — this listing
@@ -583,9 +592,12 @@ export class ReviewsRepository {
    * listing in this codebase.
    */
   async listByAuthor(params: ListByAuthorParams): Promise<ListByAuthorPage> {
-    const { authorId, limit, cursor } = params;
+    const { authorId, productId, limit, cursor } = params;
 
     const conditions: Prisma.ReviewWhereInput[] = [{ authorId }];
+    if (productId) {
+      conditions.push({ productId });
+    }
     if (cursor) {
       conditions.push(cursorWhere('newest', cursor.key, cursor.id));
     }
