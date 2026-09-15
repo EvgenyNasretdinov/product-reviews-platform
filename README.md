@@ -165,13 +165,18 @@ Requires Node 22 (pinned in `.nvmrc`) and pnpm.
 ```bash
 pnpm install
 pnpm infra:up          # Postgres, Redis, RabbitMQ only — no app containers
-cp .env.example .env   # already points at localhost, correct for this mode
+cp .env.example .env   # points at localhost — correct for this mode
 pnpm --filter @reviews/db db:migrate
 pnpm --filter @reviews/db db:seed
 pnpm --filter @reviews/api start:dev     # http://localhost:3001
 pnpm --filter @reviews/worker start:dev
 pnpm --filter @reviews/web start:dev     # http://localhost:3000
 ```
+
+The API and the worker read that `.env` because their `start:dev` scripts
+pass it to Node with `--env-file`; nothing loads it implicitly. Every
+variable in it is required and has no default, so a missing or misspelt one
+fails at startup with the full list rather than at the first request.
 
 `pnpm infra:up` and `pnpm infra:down` (`docker-compose.dev.yml`) start only
 the infrastructure, not the application containers — useful for running the
