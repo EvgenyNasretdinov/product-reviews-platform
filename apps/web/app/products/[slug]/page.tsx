@@ -74,6 +74,11 @@ export default async function ProductPage({ params }: ProductPageProps): Promise
           </Link>
           {user ? (
             <div className="flex items-center gap-3">
+              {user.role === 'MODERATOR' ? (
+                <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
+                  Moderation queue
+                </Link>
+              ) : null}
               <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
               <SignOutButton />
             </div>

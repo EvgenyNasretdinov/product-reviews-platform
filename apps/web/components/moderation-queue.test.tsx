@@ -1,0 +1,169 @@
+// @vitest-environment jsdom
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import type { ReviewDto } from '@reviews/contracts';
+import { ModerationQueue } from './moderation-queue';
+
+function buildReview(overrides: Partial<ReviewDto> = {}): ReviewDto {
+  return {
+    id: 'review-1',
+    productId: 'product-1',
+    author: { id: 'author-1', displayName: 'Liam O’Connor' },
+    rating: 1,
+    title: 'Would not recommend',
+    body: 'Poor build quality. Not worth the price. Arrived with a crack in the base.',
+    status: 'FLAGGED',
+    verifiedPurchase: false,
+    helpfulCount: 0,
+    notHelpfulCount: 0,
+    createdAt: new Date('2026-08-15T08:10:55.134Z'),
+    publishedAt: null,
+    moderationReason: 'Flagged automatically: review text contains a suspicious external link.',
+    ...overrides,
+  };
+}
+
+describe('ModerationQueue', () => {
+  it("renders each review's full body, product id, author, rating, and the reason it was flagged", () => {
+    const review = buildReview();
+    render(<ModerationQueue reviews={[review]} onDecide={vi.fn()} />);
+
+    expect(screen.getByText(review.body)).toBeInTheDocument();
+    expect(screen.getByText(review.productId)).toBeInTheDocument();
+    expect(screen.getByText(review.author.displayName)).toBeInTheDocument();
+    expect(screen.getByText(/suspicious external link/i)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /1 out of 5 stars/i })).toBeInTheDocument();
+  });
+
+  it('omits the flagged-reason panel for a review with no moderation reason', () => {
+    const review = buildReview({ id: 'review-2', status: 'PENDING', moderationReason: null });
+    render(<ModerationQueue reviews={[review]} onDecide={vi.fn()} />);
+
+    expect(screen.queryByText(/flagged automatically/i)).not.toBeInTheDocument();
+  });
+
+  it('calls onDecide with APPROVED and no reason when Approve is clicked', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    expect(onDecide).toHaveBeenCalledWith(review.id, 'APPROVED', null);
+  });
+
+  it('removes an approved review from the list once the decision succeeds', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    expect(await screen.findByText(/nothing to review/i)).toBeInTheDocument();
+    expect(screen.queryByText(review.body)).not.toBeInTheDocument();
+  });
+
+  it('keeps a review in the list and shows a message when approving it fails', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockRejectedValue(new Error('server exploded'));
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/server exploded/i);
+    expect(screen.getByText(review.body)).toBeInTheDocument();
+  });
+
+  it('opens a real dialog with a form when Reject is clicked, not window.confirm', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    const review = buildReview();
+    render(<ModerationQueue reviews={[review]} onDecide={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    const reasonField = within(dialog).getByRole('textbox', { name: /reason/i });
+    expect(reasonField).toBeInTheDocument();
+    expect(dialog.querySelector('form')).not.toBeNull();
+    expect(confirmSpy).not.toHaveBeenCalled();
+
+    // The focus trap: Radix moves focus into the dialog on open (here,
+    // onto the reason field, via its `autoFocus`) rather than leaving it
+    // on the "Reject" button behind an overlay — the behaviour
+    // `window.confirm` has no equivalent of.
+    expect(document.activeElement).toBe(reasonField);
+
+    await userEvent.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('keeps the confirm button disabled until a reason is entered, then calls onDecide with REJECTED and the reason', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    const dialog = await screen.findByRole('dialog');
+    const confirmButton = within(dialog).getByRole('button', { name: /reject review/i });
+
+    expect(confirmButton).toBeDisabled();
+
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Contains a spam link');
+    expect(confirmButton).toBeEnabled();
+
+    await userEvent.click(confirmButton);
+
+    expect(onDecide).toHaveBeenCalledWith(review.id, 'REJECTED', 'Contains a spam link');
+  });
+
+  it('removes a rejected review from the list once the decision succeeds, and closes the dialog', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    const dialog = await screen.findByRole('dialog');
+    await userEvent.type(within(dialog).getByRole('textbox', { name: /reason/i }), 'Off-topic content');
+    await userEvent.click(within(dialog).getByRole('button', { name: /reject review/i }));
+
+    expect(await screen.findByText(/nothing to review/i)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps the dialog open and shows a message when rejecting fails, without discarding the typed reason', async () => {
+    const review = buildReview();
+    const onDecide = vi.fn().mockRejectedValue(new Error('the review was already decided'));
+    render(<ModerationQueue reviews={[review]} onDecide={onDecide} />);
+
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    const dialog = await screen.findByRole('dialog');
+    const reasonField = within(dialog).getByRole('textbox', { name: /reason/i });
+    await userEvent.type(reasonField, 'Off-topic content');
+    await userEvent.click(within(dialog).getByRole('button', { name: /reject review/i }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/already decided/i);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(reasonField).toHaveValue('Off-topic content');
+  });
+
+  it('shows a clear empty-queue message rather than a blank panel when there is nothing to review', () => {
+    render(<ModerationQueue reviews={[]} onDecide={vi.fn()} />);
+
+    expect(screen.getByText(/nothing to review/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument();
+  });
+
+  it('accepts custom empty-state copy for a queue scoped to one status', () => {
+    render(
+      <ModerationQueue
+        reviews={[]}
+        onDecide={vi.fn()}
+        emptyTitle="No pending reviews"
+        emptyDescription="Every submitted review has been classified."
+      />,
+    );
+
+    expect(screen.getByText('No pending reviews')).toBeInTheDocument();
+  });
+});
