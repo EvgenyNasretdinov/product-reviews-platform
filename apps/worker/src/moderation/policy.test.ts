@@ -46,6 +46,21 @@ describe('defaultPolicy', () => {
     expect(classify({ body: 'Battery life on the MBP with USB-C is great.' }).decision).toBe('APPROVED');
   });
 
+  // The seed's one FLAGGED fixture (packages/db/prisma/seed.ts) hardcodes
+  // both this body and the reason beside it, so that the moderation queue
+  // shows a review whose verdict the classifier would genuinely reach.
+  // It previously claimed a "suspicious external link" on a body with no
+  // link and no rule behind it. This keeps the two from drifting apart
+  // again: change a threshold and the fixture stops being reproducible
+  // here, rather than on the screen.
+  it("flags the seed's FLAGGED fixture, with the reason the seed stores", () => {
+    const verdict = classify({ body: 'TOTAL WASTE OF MONEY AND IT BROKE WITHIN A WEEK OF NORMAL USE' });
+    expect(verdict).toEqual({
+      decision: 'FLAGGED',
+      reason: 'Review appears to be shouting (excessive uppercase).',
+    });
+  });
+
   it('flags a review duplicated from the same author', () => {
     const body = 'Used it for two months and it still works perfectly.';
     expect(classify({ body, authorPreviousBodies: [body] }).decision).toBe('FLAGGED');

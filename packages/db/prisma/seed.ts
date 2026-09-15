@@ -115,6 +115,14 @@ interface ReviewSpec {
   rating: number;
   status: ReviewStatus;
   moderationReason?: string;
+  /**
+   * Overrides the generated text. Used by the one FLAGGED fixture, whose
+   * body has to be something the real classifier would actually flag —
+   * a generic negative review would be approved, leaving a moderation
+   * reason on screen that nothing in the system could have produced.
+   */
+  title?: string;
+  body?: string;
 }
 
 // One entry per product. Counts are deliberately uneven (8, 6, 5, 4, 3, 2, 1,
@@ -146,7 +154,18 @@ const REVIEW_PLAN: Record<string, ReviewSpec[]> = {
       email: 'reviewer06@example.com',
       rating: 1,
       status: 'FLAGGED',
-      moderationReason: 'Flagged automatically: review text contains a suspicious external link.',
+      // Body, reason and verdict all agree with apps/worker's own policy:
+      // over 40 characters and almost entirely uppercase is exactly what
+      // its shouting rule flags, and this is the string that rule emits,
+      // verbatim. Paste this body into the review form and the classifier
+      // reaches the same conclusion, which is the point of a fixture.
+      //
+      // Note there is no "Flagged automatically:" prefix here — the
+      // moderation queue renders that label itself, so carrying it in the
+      // data too printed it twice.
+      title: 'WOULD NOT RECOMMEND',
+      body: 'TOTAL WASTE OF MONEY AND IT BROKE WITHIN A WEEK OF NORMAL USE',
+      moderationReason: 'Review appears to be shouting (excessive uppercase).',
     },
   ],
   [PRODUCTS[2]!.slug]: [
@@ -281,8 +300,14 @@ async function main(): Promise<void> {
       const verifiedPurchase = spec.email === 'alice@example.com' && ALICE_PURCHASED_SLUGS.includes(slug);
       const createdAt = daysAgo(60 - reviewIndex * 2);
       const publishedAt = spec.status === 'APPROVED' ? createdAt : null;
-      const title = pickText(TITLES, spec.rating);
-      const body = pickText(BODIES, spec.rating).replace('{name}', product.name);
+      // pickText advances a shared variant counter, so it is called even
+      // when the spec overrides the result: skipping it would shift every
+      // later review's text and make this fixture's presence change
+      // unrelated rows.
+      const generatedTitle = pickText(TITLES, spec.rating);
+      const generatedBody = pickText(BODIES, spec.rating).replace('{name}', product.name);
+      const title = spec.title ?? generatedTitle;
+      const body = spec.body ?? generatedBody;
 
       await prisma.review.upsert({
         where: { productId_authorId: { productId: product.id, authorId: author.id } },

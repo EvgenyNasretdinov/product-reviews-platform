@@ -20,7 +20,7 @@ function buildReview(overrides: Partial<ModerationReviewDto> = {}): ModerationRe
     notHelpfulCount: 0,
     createdAt: new Date('2026-08-15T08:10:55.134Z'),
     publishedAt: null,
-    moderationReason: 'Flagged automatically: review text contains a suspicious external link.',
+    moderationReason: 'Review appears to be shouting (excessive uppercase).',
     ...overrides,
   };
 }
@@ -32,13 +32,22 @@ describe('ModerationQueue', () => {
 
     expect(screen.getByText(review.body)).toBeInTheDocument();
     expect(screen.getByText(review.author.displayName)).toBeInTheDocument();
-    expect(screen.getByText(/suspicious external link/i)).toBeInTheDocument();
+    expect(screen.getByText(/excessive uppercase/i)).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /1 out of 5 stars/i })).toBeInTheDocument();
 
     // The product: shown by name (not a bare id), linked to its own page
     // so a moderator can see this review in context in one click.
     const productLink = screen.getByRole('link', { name: review.product.name });
     expect(productLink).toHaveAttribute('href', `/products/${review.product.slug}`);
+  });
+
+  it('renders the "Flagged automatically" label once, not doubled by the stored reason', () => {
+    // The queue prints that label itself. The seeded fixture used to carry
+    // the same words inside moderationReason as well, so the screen read
+    // "Flagged automatically: Flagged automatically: ...".
+    render(<ModerationQueue reviews={[buildReview()]} onDecide={vi.fn()} />);
+
+    expect(document.body.textContent).not.toMatch(/Flagged automatically:\s*Flagged automatically/i);
   });
 
   it("links each review's product row to that review's own product, not a shared one", () => {
