@@ -6,7 +6,12 @@ import { moderationQueueSchema } from '../moderation.service.js';
 // controller never constructs them.
 export class ModerationDecisionRequestDto extends createZodDto(moderationDecisionInputSchema) {}
 
-// `moderationQueueSchema` (`paginatedSchema(reviewDtoSchema)`) is imported
-// from the service rather than redefined here — the same pattern as
-// products/dto/products.dto.ts's `ProductListResponseDto`.
+// `moderationQueueSchema` (`paginatedSchema(moderationReviewDtoSchema)` —
+// `ReviewDto` plus the `product` it's about) is imported from the service
+// rather than redefined here — the same pattern as
+// products/dto/products.dto.ts's `ProductListResponseDto`. Deriving the
+// OpenAPI schema from that Zod schema via `createZodDto` is also what
+// keeps this DTO's generated shape (and therefore /docs-json) in sync
+// automatically whenever `moderationReviewDtoSchema` changes — there is no
+// separate, hand-written property list here that could drift from it.
 export class ModerationQueueResponseDto extends createZodDto(moderationQueueSchema) {}

@@ -7,6 +7,18 @@ import { PrismaService } from '../common/prisma/prisma.service.js';
 /** A review row joined with the author fields the DTO exposes. */
 export type ReviewWithAuthor = Review & { author: { id: string; displayName: string } };
 
+/**
+ * `ReviewWithAuthor` plus the product's own `name`/`slug` — only
+ * `listQueue` below returns this. The moderation queue is the one
+ * listing that spans many products at once (a moderator works through
+ * everything flagged or pending, not one product's reviews), so it's the
+ * one place a bare `productId` isn't enough context to judge a review by
+ * — see `moderationReviewDtoSchema`'s doc comment in `@reviews/contracts`
+ * for why this isn't just folded into `ReviewWithAuthor` for every
+ * listing.
+ */
+export type ReviewWithAuthorAndProduct = ReviewWithAuthor & { product: { name: string; slug: string } };
+
 /** The Prisma column a public sort order paginates on — see {@link SORTS}. */
 type SortColumn = 'helpfulCount' | 'createdAt' | 'rating';
 
@@ -226,7 +238,7 @@ export interface ModerationQueueParams {
 
 export interface ModerationQueuePage {
   /** At most `limit` rows — see {@link ListApprovedReviewsPage} for why. */
-  rows: ReviewWithAuthor[];
+  rows: ReviewWithAuthorAndProduct[];
   hasMore: boolean;
 }
 
@@ -654,6 +666,12 @@ export class ReviewsRepository {
    * `body`) comes back: a moderator cannot judge an excerpt, so this is
    * the one listing in the codebase that doesn't need `toPublicReviewDto`'s
    * trimming.
+   *
+   * Also joins `product` (`name`/`slug` only) — a single join on
+   * `Review.productId`, an indexed foreign key, on an endpoint a handful
+   * of moderators hit. This is the one listing that spans many products
+   * at once, so it's the one place a bare `productId` isn't enough
+   * context on its own; see `ReviewWithAuthorAndProduct`'s doc comment.
    */
   async listQueue(params: ModerationQueueParams): Promise<ModerationQueuePage> {
     const { status, limit, cursor } = params;
@@ -667,7 +685,10 @@ export class ReviewsRepository {
       where: { AND: conditions },
       orderBy: SORTS.newest.orderBy,
       take: limit + 1,
-      include: { author: { select: { id: true, displayName: true } } },
+      include: {
+        author: { select: { id: true, displayName: true } },
+        product: { select: { name: true, slug: true } },
+      },
     });
 
     const hasMore = rows.length > limit;
