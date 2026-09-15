@@ -1,0 +1,164 @@
+# Full containerised stack: Postgres, Redis, RabbitMQ, the API, the
+# worker, and the web app, reachable at http://localhost:3000 with a
+# single `docker compose up`.
+#
+# `name:` below gives this stack its own Compose project namespace,
+# distinct from docker-compose.dev.yml's (which defaults to the directory
+# name). That is what keeps the two stacks' containers and volumes from
+# colliding when both files live in the same directory — this one is
+# never meant to be combined with docker-compose.dev.yml via `-f`; it is
+# a full replacement for it, not an overlay on top of it.
+#
+# Migrations and seeding run as the one-shot `migrate` service below.
+# `api` and `worker` both wait on it with `service_completed_successfully`,
+# so an unmigrated, unseeded database can never be what they start
+# against — nobody has to know to run migrations before `up`.
+name: product-reviews-platform
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: reviews
+      POSTGRES_PASSWORD: reviews
+      POSTGRES_DB: reviews
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reviews -d reviews"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 2s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  # One-shot: applies migrations, then seeds. `restart: "no"` means a
+  # failure here surfaces as a failed/exited container instead of an
+  # endless restart loop; `service_completed_successfully` below is what
+  # api/worker actually wait on.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://reviews:reviews@postgres:5432/reviews?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: runtime
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      API_PORT: "3001"
+      DATABASE_URL: postgresql://reviews:reviews@postgres:5432/reviews?schema=public
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      JWT_SECRET: dev-only-secret-change-me-in-prod
+      JWT_EXPIRES_IN: 12h
+      REVIEW_SUBMIT_RATE_LIMIT: "5"
+      # The browser's own origin (the published host port), used only for
+      # CORS — never for the API to call itself.
+      WEB_ORIGIN: http://localhost:3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      # node:22-alpine has no curl; wget (busybox) does the same job.
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3001/api/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      target: runtime
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://reviews:reviews@postgres:5432/reviews?schema=public
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      OUTBOX_BATCH_SIZE: "20"
+      OUTBOX_MAX_ATTEMPTS: "5"
+      OUTBOX_POLL_INTERVAL_MS: "500"
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    # No HTTP surface to probe (see apps/worker/src/main.ts) — this only
+    # confirms the process is still running, not that its broker/DB
+    # connections are healthy. A worker stuck with a dead RabbitMQ
+    # connection still reports healthy here; that gap can only really be
+    # closed by watching the outbox backlog or the worker's own logs.
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "apps/worker/dist/src/main.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+      args:
+        # Baked into the browser bundle at build time — must be the
+        # published host port, not the Compose service name (the browser
+        # can't resolve "api"). See apps/web/Dockerfile.
+        NEXT_PUBLIC_API_URL: http://localhost:3001/api/v1
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      # Read by the Next *server* at request time — must be the Compose
+      # service name, not the published port, and must NOT be the same
+      # value as NEXT_PUBLIC_API_URL above once this runs in a container.
+      API_INTERNAL_URL: http://api:3001/api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  rabbitmq-data:

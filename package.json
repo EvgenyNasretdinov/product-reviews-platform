@@ -13,7 +13,10 @@
     "test:e2e": "pnpm --filter @reviews/web test:e2e",
     "infra:up": "docker compose -f docker-compose.dev.yml up -d --wait",
     "infra:down": "docker compose -f docker-compose.dev.yml down -v",
-    "infra:check": "./scripts/check-infra.sh"
+    "infra:check": "./scripts/check-infra.sh",
+    "compose:up": "docker compose up -d --wait",
+    "compose:down": "docker compose down -v",
+    "smoke": "./scripts/smoke.sh"
   },
   "devDependencies": {
     "turbo": "^2.3.0",
