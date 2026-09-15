@@ -4,8 +4,7 @@ import { paginatedSchema, productDetailDtoSchema, type ProductDetailDto } from '
 import { EmptyState } from '@/components/empty-state';
 import { ProductCard } from '@/components/product-card';
 import { SearchField } from '@/components/search-field';
-import { SignOutButton } from '@/components/sign-out-button';
-import { ThemeToggle } from '@/components/theme-toggle';
+import { SiteHeader } from '@/components/site-header';
 import { apiFetch } from '@/lib/api-client';
 import { ApiError } from '@/lib/errors';
 import { getServerSession } from '@/lib/session';
@@ -67,31 +66,7 @@ export default async function HomePage({ searchParams }: HomePageProps): Promise
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-border">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4">
-          <Link href="/" className="text-lg font-semibold">
-            Product Reviews
-          </Link>
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            {user ? (
-              <>
-                {user.role === 'MODERATOR' ? (
-                  <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
-                    Moderation queue
-                  </Link>
-                ) : null}
-                <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
-                <SignOutButton />
-              </>
-            ) : (
-              <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
-                Sign in
-              </Link>
-            )}
-          </div>
-        </div>
-      </header>
+      <SiteHeader user={user} />
 
       <main className="mx-auto max-w-6xl px-4 py-8">
         <h1 className="mb-6 text-2xl font-semibold">Products</h1>

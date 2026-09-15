@@ -4,8 +4,7 @@ import type { ReactNode } from 'react';
 import { productDetailDtoSchema, type ProductDetailDto } from '@reviews/contracts';
 import { RatingStars } from '@/components/rating-stars';
 import { ReviewList } from '@/components/review-list';
-import { SignOutButton } from '@/components/sign-out-button';
-import { ThemeToggle } from '@/components/theme-toggle';
+import { SiteHeader } from '@/components/site-header';
 import { WriteReviewSection } from '@/components/write-review-section';
 import { apiFetch } from '@/lib/api-client';
 import { ApiError } from '@/lib/errors';
@@ -68,31 +67,7 @@ export default async function ProductPage({ params }: ProductPageProps): Promise
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-border">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4">
-          <Link href="/" className="text-lg font-semibold">
-            Product Reviews
-          </Link>
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            {user ? (
-              <>
-                {user.role === 'MODERATOR' ? (
-                  <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
-                    Moderation queue
-                  </Link>
-                ) : null}
-                <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
-                <SignOutButton />
-              </>
-            ) : (
-              <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
-                Sign in
-              </Link>
-            )}
-          </div>
-        </div>
-      </header>
+      <SiteHeader user={user} />
 
       <main className="mx-auto flex max-w-6xl flex-col gap-10 px-4 py-8">
         <Link href="/" className="text-sm font-medium text-muted-foreground underline-offset-4 hover:underline">

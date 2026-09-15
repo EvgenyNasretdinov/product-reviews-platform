@@ -1,9 +1,7 @@
-import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { ModerationSection } from '@/components/moderation-section';
-import { SignOutButton } from '@/components/sign-out-button';
-import { ThemeToggle } from '@/components/theme-toggle';
+import { SiteHeader } from '@/components/site-header';
 import { getServerSession } from '@/lib/session';
 
 /**
@@ -34,18 +32,7 @@ export default async function ModerationPage(): Promise<ReactNode> {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-border">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4">
-          <Link href="/" className="text-lg font-semibold">
-            Product Reviews
-          </Link>
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
-            <SignOutButton />
-          </div>
-        </div>
-      </header>
+      <SiteHeader user={user} />
 
       <main className="mx-auto flex max-w-4xl flex-col gap-10 px-4 py-8">
         <div>
