@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { ModerationSection } from '@/components/moderation-section';
 import { SignOutButton } from '@/components/sign-out-button';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { getServerSession } from '@/lib/session';
 
 /**
@@ -39,6 +40,7 @@ export default async function ModerationPage(): Promise<ReactNode> {
             Product Reviews
           </Link>
           <div className="flex items-center gap-3">
+            <ThemeToggle />
             <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
             <SignOutButton />
           </div>

@@ -5,6 +5,7 @@ import { productDetailDtoSchema, type ProductDetailDto } from '@reviews/contract
 import { RatingStars } from '@/components/rating-stars';
 import { ReviewList } from '@/components/review-list';
 import { SignOutButton } from '@/components/sign-out-button';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { WriteReviewSection } from '@/components/write-review-section';
 import { apiFetch } from '@/lib/api-client';
 import { ApiError } from '@/lib/errors';
@@ -72,21 +73,24 @@ export default async function ProductPage({ params }: ProductPageProps): Promise
           <Link href="/" className="text-lg font-semibold">
             Product Reviews
           </Link>
-          {user ? (
-            <div className="flex items-center gap-3">
-              {user.role === 'MODERATOR' ? (
-                <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
-                  Moderation queue
-                </Link>
-              ) : null}
-              <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
-              <SignOutButton />
-            </div>
-          ) : (
-            <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
-              Sign in
-            </Link>
-          )}
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            {user ? (
+              <>
+                {user.role === 'MODERATOR' ? (
+                  <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
+                    Moderation queue
+                  </Link>
+                ) : null}
+                <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
+                <SignOutButton />
+              </>
+            ) : (
+              <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
+                Sign in
+              </Link>
+            )}
+          </div>
         </div>
       </header>
 

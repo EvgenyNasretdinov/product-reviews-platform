@@ -5,6 +5,7 @@ import { EmptyState } from '@/components/empty-state';
 import { ProductCard } from '@/components/product-card';
 import { SearchField } from '@/components/search-field';
 import { SignOutButton } from '@/components/sign-out-button';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { apiFetch } from '@/lib/api-client';
 import { ApiError } from '@/lib/errors';
 import { getServerSession } from '@/lib/session';
@@ -71,21 +72,24 @@ export default async function HomePage({ searchParams }: HomePageProps): Promise
           <Link href="/" className="text-lg font-semibold">
             Product Reviews
           </Link>
-          {user ? (
-            <div className="flex items-center gap-3">
-              {user.role === 'MODERATOR' ? (
-                <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
-                  Moderation queue
-                </Link>
-              ) : null}
-              <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
-              <SignOutButton />
-            </div>
-          ) : (
-            <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
-              Sign in
-            </Link>
-          )}
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            {user ? (
+              <>
+                {user.role === 'MODERATOR' ? (
+                  <Link href="/moderation" className="text-sm font-medium underline-offset-4 hover:underline">
+                    Moderation queue
+                  </Link>
+                ) : null}
+                <span className="text-sm text-muted-foreground">Signed in as {user.displayName}</span>
+                <SignOutButton />
+              </>
+            ) : (
+              <Link href="/login" className="text-sm font-medium underline-offset-4 hover:underline">
+                Sign in
+              </Link>
+            )}
+          </div>
         </div>
       </header>
 
