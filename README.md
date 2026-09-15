@@ -12,7 +12,7 @@ product's rating.
 ## Quick start
 
 ```bash
-git clone <this-repository-url>
+git clone https://github.com/EvgenyNasretdinov/product-reviews-platform.git
 cd product-reviews-platform
 docker compose up -d --wait
 ```
