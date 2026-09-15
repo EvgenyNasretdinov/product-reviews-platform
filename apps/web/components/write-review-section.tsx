@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import type { ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { ReviewForm } from '@/components/review-form';
 import { YourReviewSection } from '@/components/your-review-section';
 import { useMyReview } from '@/hooks/use-my-review';
@@ -31,6 +32,7 @@ interface WriteReviewSectionProps {
 export function WriteReviewSection({ productId, isSignedIn }: WriteReviewSectionProps): ReactNode {
   const myReview = useMyReview(productId, isSignedIn);
   const submitReview = useSubmitReview(productId);
+  useRefreshWhenOwnReviewChanges(myReview.data ?? null);
 
   if (!isSignedIn) {
     return (
@@ -70,4 +72,54 @@ export function WriteReviewSection({ productId, isSignedIn }: WriteReviewSection
       <ReviewForm productId={productId} onSubmit={(input) => submitReview.mutateAsync(input)} />
     </div>
   );
+}
+
+/**
+ * The rating summary at the top of this page — the average, the count,
+ * the histogram — is rendered by a Server Component (see
+ * app/products/[slug]/page.tsx) and is therefore fixed for the life of
+ * that render. Everything else on the page reacts on its own: the review
+ * list is a client query, and `useMyReview` polls while a review is
+ * awaiting moderation. The summary was the one thing that did not, so an
+ * author watching their own review turn from "Awaiting moderation" to
+ * published saw the count beside it stay put until they reloaded.
+ *
+ * `router.refresh()` re-runs the server render in place, which is what
+ * makes the summary catch up without losing client state or scroll
+ * position.
+ *
+ * It fires twice on purpose. Moderation and aggregation are two separate
+ * consumers of two separate events: a review is marked APPROVED first,
+ * and only then does `review.approved` reach the consumer that recomputes
+ * the product's rating. The status this hook is watching therefore
+ * changes slightly *before* the numbers do, so a single refresh at that
+ * moment can still read the previous projection. The second pass, a beat
+ * later, is what catches it. Refreshing one extra time costs one server
+ * render of a page the visitor is already looking at.
+ */
+function useRefreshWhenOwnReviewChanges(review: { id: string; status: string } | null): void {
+  const router = useRouter();
+  const previous = useRef<string | null>(null);
+
+  // Identity and status together: a delete (review -> null) and an edit
+  // that sends an approved review back to PENDING both move the rating,
+  // and neither is a plain status change on a stable row.
+  const signature = review ? `${review.id}:${review.status}` : 'none';
+
+  useEffect(() => {
+    const isFirstObservation = previous.current === null;
+    const changed = previous.current !== signature;
+    previous.current = signature;
+
+    // Nothing has moved yet on the first pass — this is just the page as
+    // it was rendered, and refreshing it would be a wasted round trip on
+    // every single page load.
+    if (isFirstObservation || !changed) {
+      return;
+    }
+
+    router.refresh();
+    const timer = setTimeout(() => router.refresh(), 1500);
+    return () => clearTimeout(timer);
+  }, [signature, router]);
 }
