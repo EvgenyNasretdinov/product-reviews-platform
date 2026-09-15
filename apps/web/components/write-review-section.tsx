@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { ReviewForm } from '@/components/review-form';
-import { YourReview } from '@/components/your-review';
+import { YourReviewSection } from '@/components/your-review-section';
 import { useMyReview } from '@/hooks/use-my-review';
 import { useSubmitReview } from '@/hooks/use-submit-review';
 
@@ -61,7 +61,7 @@ export function WriteReviewSection({ productId, isSignedIn }: WriteReviewSection
   }
 
   if (myReview.data) {
-    return <YourReview review={myReview.data} />;
+    return <YourReviewSection productId={productId} review={myReview.data} />;
   }
 
   return (

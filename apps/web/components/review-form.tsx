@@ -53,6 +53,23 @@ export interface ReviewFormProps {
    * `vi.fn()` and no `QueryClientProvider` at all.
    */
   onSubmit: (input: CreateReviewInput) => Promise<unknown>;
+  /**
+   * Prefills the fields. Supplied when editing an existing review, so the
+   * author starts from what they wrote rather than a blank form; omitted
+   * when writing a new one.
+   */
+  defaultValues?: CreateReviewInput;
+  /** Overrides the submit button's idle and in-flight labels. */
+  submitLabel?: string;
+  submittingLabel?: string;
+  /**
+   * Renders a Cancel button beside submit when provided. Editing needs a
+   * way back to the review as it stands; first-time writing has nothing
+   * to go back to, so the button is absent rather than inert.
+   */
+  onCancel?: () => void;
+  /** Replaces the note under the button about reviews being checked. */
+  hint?: string;
 }
 
 function messageFor(error: unknown): string {
@@ -70,7 +87,14 @@ function messageFor(error: unknown): string {
  * `useSubmitReview(productId)` has one prop to pass instead of having to
  * thread the id past this component to get to its own `onSubmit`.
  */
-export function ReviewForm({ onSubmit }: ReviewFormProps): ReactNode {
+export function ReviewForm({
+  onSubmit,
+  defaultValues,
+  submitLabel = 'Submit review',
+  submittingLabel = 'Submitting…',
+  onCancel,
+  hint = 'Reviews are checked before they appear publicly, usually within moments.',
+}: ReviewFormProps): ReactNode {
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const {
@@ -81,7 +105,27 @@ export function ReviewForm({ onSubmit }: ReviewFormProps): ReactNode {
   } = useForm<CreateReviewInput>({
     resolver: zodResolver(reviewFormSchema),
     mode: 'onChange',
-    defaultValues: { rating: UNSET_RATING, title: '', body: '' },
+    // `rating` is stringified for the same reason the schema above
+    // coerces it back: react-hook-form checks a radio by comparing the
+    // default against the input's raw DOM `value`, which is always a
+    // string. Handing it the number 4 leaves every star unchecked, so
+    // opening an existing review to edit it would silently drop the
+    // rating — the field reads as "nothing chosen yet" and the save
+    // button never enables. Covered by your-review-section.test.tsx's
+    // "opens a prefilled form on Edit".
+    //
+    // The cast is the honest shape of that: this one field holds a string
+    // until the resolver coerces it, while the type describes what the
+    // API receives. Widening the type parameter instead does not
+    // typecheck — zodResolver's `Resolver` is pinned to the schema's
+    // output type, so `useForm` and the resolver would disagree.
+    defaultValues: defaultValues
+      ? ({
+          rating: String(defaultValues.rating),
+          title: defaultValues.title,
+          body: defaultValues.body,
+        } as unknown as CreateReviewInput)
+      : { rating: UNSET_RATING, title: '', body: '' },
   });
 
   // Drives the disabled state directly off the same schema the resolver
@@ -180,13 +224,21 @@ export function ReviewForm({ onSubmit }: ReviewFormProps): ReactNode {
         </p>
       ) : null}
 
-      <Button type="submit" disabled={!isFormValid || isSubmitting} className="self-start">
-        {isSubmitting ? 'Submitting…' : 'Submit review'}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="submit" disabled={!isFormValid || isSubmitting}>
+          {isSubmitting ? submittingLabel : submitLabel}
+        </Button>
+        {onCancel ? (
+          // Stays enabled while a submission is in flight: a request that
+          // hangs is exactly when someone most wants out, and abandoning
+          // the edit costs nothing that is not already on the server.
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        ) : null}
+      </div>
 
-      <p className="text-xs text-muted-foreground">
-        Reviews are checked before they appear publicly, usually within moments.
-      </p>
+      <p className="text-xs text-muted-foreground">{hint}</p>
     </form>
   );
 }

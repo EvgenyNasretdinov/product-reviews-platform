@@ -2,9 +2,18 @@ import type { ReactNode } from 'react';
 import type { ReviewDto } from '@reviews/contracts';
 import { RatingStars } from '@/components/rating-stars';
 import { StatusBadge } from '@/components/status-badge';
+import { Button } from '@/components/ui/button';
 
 interface YourReviewProps {
   review: ReviewDto;
+  /**
+   * Render the Edit and Delete controls. Both are optional so this stays
+   * a display component: it never performs either action, and a caller
+   * that has nothing to wire in (a test, or a future read-only context)
+   * gets the panel without controls rather than with dead ones.
+   */
+  onEdit?: () => void;
+  onDelete?: () => void;
 }
 
 /**
@@ -25,7 +34,7 @@ interface YourReviewProps {
  * row by accident. `StatusBadge`, which actually renders
  * `moderationReason`, is used only from here.
  */
-export function YourReview({ review }: YourReviewProps): ReactNode {
+export function YourReview({ review, onEdit, onDelete }: YourReviewProps): ReactNode {
   const isAwaitingModeration = review.status === 'PENDING' || review.status === 'FLAGGED';
 
   return (
@@ -51,6 +60,21 @@ export function YourReview({ review }: YourReviewProps): ReactNode {
           Reviews are checked before publication, usually within moments. This won&rsquo;t appear in the list below
           until it&rsquo;s approved.
         </p>
+      ) : null}
+
+      {onEdit || onDelete ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {onEdit ? (
+            <Button type="button" variant="outline" size="sm" onClick={onEdit}>
+              Edit
+            </Button>
+          ) : null}
+          {onDelete ? (
+            <Button type="button" variant="ghost" size="sm" onClick={onDelete}>
+              Delete
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
