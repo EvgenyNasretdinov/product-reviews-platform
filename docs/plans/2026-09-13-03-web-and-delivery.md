@@ -766,8 +766,8 @@ Then walk through every numbered step of "Try the interesting bits" and confirm 
 
 - [ ] **Step 4: Check for stray references**
 
-Run: `git grep -niE 'assignment|interview|candidate|recruiter|home[ -]task'`
-Expected: no matches other than the known `candidate` local variables. The repository is public and must read as a project, not as a submission.
+Run: `git grep -niE 'TODO|FIXME|XXX|placeholder|lorem'`
+Expected: no matches in shipped source or documentation. Drafting leftovers are the cheapest thing to remove and among the first things a reader notices in a public repository.
 
 - [ ] **Step 5: Commit**
 
