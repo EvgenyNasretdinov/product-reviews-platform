@@ -10,6 +10,16 @@ interface VoteResponseBody {
   notHelpfulCount: number;
 }
 
+/** Pulls one review's `helpfulCount` out of a `GET /products/:id/reviews` body, by id — narrows supertest's `any` the same way `VoteResponseBody` does above. */
+function helpfulCountFor(body: unknown, reviewId: string): number {
+  const { items } = body as { items: Array<{ id: string; helpfulCount: number }> };
+  const item = items.find((candidate) => candidate.id === reviewId);
+  if (!item) {
+    throw new Error(`review ${reviewId} not found in review-list response`);
+  }
+  return item.helpfulCount;
+}
+
 const ctx = setupTestApp();
 
 interface ApprovedReviewFixture {
@@ -195,5 +205,31 @@ describe('PUT/DELETE /api/v1/reviews/:reviewId/vote', () => {
       .send({ value: 'HELPFUL' })
       .expect(400);
     await ctx.request.delete('/api/v1/reviews/not-a-uuid/vote').auth(voterToken, { type: 'bearer' }).expect(400);
+  });
+
+  // A vote must invalidate the review-list cache-aside (see
+  // cache.integration.test.ts's "review list cache-aside" suite for the
+  // read side of this same cache), or a voter who reloads the list they
+  // just voted on would see it as it stood before their vote for up to
+  // `TTL_REVIEW_LIST` seconds — see `VotesService.invalidateReviewList`'s
+  // doc comment. The first GET below populates the first-page cache entry
+  // with the pre-vote count; if the vote below didn't delete it, the two
+  // GETs that follow would both still return that same stale entry.
+  it('a vote invalidates the review-list cache, so the next list read reflects it rather than the pre-vote count', async () => {
+    const { productId, reviewId } = await createApprovedReview();
+    const voterToken = await ctx.loginAs('voter-cache@example.com');
+
+    const before = await ctx.request.get(`/api/v1/products/${productId}/reviews`).expect(200);
+    expect(helpfulCountFor(before.body, reviewId)).toBe(0);
+
+    await vote(reviewId, voterToken, 'HELPFUL').expect(200);
+
+    const afterVote = await ctx.request.get(`/api/v1/products/${productId}/reviews`).expect(200);
+    expect(helpfulCountFor(afterVote.body, reviewId)).toBe(1);
+
+    await unvote(reviewId, voterToken).expect(204);
+
+    const afterRemove = await ctx.request.get(`/api/v1/products/${productId}/reviews`).expect(200);
+    expect(helpfulCountFor(afterRemove.body, reviewId)).toBe(0);
   });
 });

@@ -1,5 +1,5 @@
 import type { Review, ReviewStatus } from '@reviews/db';
-import type { ReviewDto } from '@reviews/contracts';
+import type { ModerationReviewDto, ReviewDto } from '@reviews/contracts';
 import { describe, expect, it } from 'vitest';
 import { createProduct, createReview, createUser } from './fixtures.js';
 import { setupTestApp } from './harness.js';
@@ -7,7 +7,7 @@ import { setupTestApp } from './harness.js';
 // supertest's Response#body is typed `any`; narrow it through this shape
 // once instead of sprinkling eslint-disable comments at each access.
 interface ModerationQueueBody {
-  items: ReviewDto[];
+  items: ModerationReviewDto[];
   nextCursor: string | null;
 }
 
@@ -123,6 +123,26 @@ describe('GET /api/v1/moderation/reviews', () => {
     expect(item?.title).toBe('Detailed review title');
     expect(item?.body).toBe('A long, detailed review body a moderator needs to read in full to judge.');
     expect(item?.author.displayName).toBe('Judgeable Author');
+  });
+
+  // The queue is the one listing that spans many products at once, so a
+  // bare productId isn't enough for a moderator to judge a review by —
+  // see moderationReviewDtoSchema's doc comment (@reviews/contracts).
+  // Asserted against explicit, non-default name/slug (rather than
+  // fixtures.ts's generated defaults) so this can't pass by accident if
+  // the mapper only echoed back whatever createProduct happened to
+  // generate.
+  it("includes the product's name and slug for each queued review", async () => {
+    const modToken = await ctx.loginAs('mod@example.com');
+    const author = await createUser(ctx.prisma, { displayName: 'Product Context Author' });
+    const product = await createProduct(ctx.prisma, { name: 'Desk Lamp Deluxe', slug: 'desk-lamp-deluxe' });
+    const review = await createReview(ctx.prisma, { productId: product.id, authorId: author.id, status: 'FLAGGED' });
+
+    const res = await listQueue(modToken).expect(200);
+    const body = res.body as ModerationQueueBody;
+    const item = body.items.find((r) => r.id === review.id);
+
+    expect(item?.product).toEqual({ name: 'Desk Lamp Deluxe', slug: 'desk-lamp-deluxe' });
   });
 });
 

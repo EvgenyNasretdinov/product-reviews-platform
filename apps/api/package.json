@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "start": "node dist/main.js",
-    "start:dev": "nest start --watch",
+    "start:dev": "nest start --watch --env-file ../../.env",
     "pretest:unit": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",
     "test:unit": "vitest run --config vitest.config.ts",
     "pretest:integration": "(test -d ../../packages/db/dist || pnpm --filter @reviews/db run build) && (test -d ../../packages/contracts/dist || pnpm --filter @reviews/contracts run build)",

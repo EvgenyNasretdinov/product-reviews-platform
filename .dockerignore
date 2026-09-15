@@ -1,0 +1,40 @@
+# Keep the build context small and, more importantly, keep local secrets
+# and machine-specific artifacts out of it: everything here is either
+# reproducible from source inside the image or must never be baked into
+# one.
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/.turbo
+coverage
+**/coverage
+test-results
+**/test-results
+playwright-report
+**/playwright-report
+blob-report
+**/blob-report
+*.tsbuildinfo
+**/*.tsbuildinfo
+.prisma-generate.lock
+**/.prisma-generate.lock
+
+# Local secrets — never part of the build context. Compose supplies every
+# variable a container needs via environment:/env_file:.
+.env
+.env.local
+**/.env
+**/.env.local
+
+.git
+.gitignore
+.github
+.superpowers
+docs
+*.log
+.DS_Store
+**/.DS_Store

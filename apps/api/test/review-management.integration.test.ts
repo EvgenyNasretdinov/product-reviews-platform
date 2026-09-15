@@ -245,4 +245,47 @@ describe('GET /api/v1/me/reviews', () => {
     await ctx.request.get('/api/v1/me/reviews?limit=0').auth(token, { type: 'bearer' }).expect(400);
     await ctx.request.get('/api/v1/me/reviews?limit=101').auth(token, { type: 'bearer' }).expect(400);
   });
+
+  // Regression guard for the "have I already reviewed this product" check
+  // the web app's product page runs: without a productId filter, that
+  // check has to page through the caller's entire history client-side to
+  // find one match, which silently gives up past whatever page limit it
+  // sets — an author whose review of a given product sits past that limit
+  // is wrongly told they haven't reviewed it yet, shown the form again,
+  // and hits a 409 on resubmission.
+  it('filters to the review for one product when productId is given', async () => {
+    const token = await ctx.loginAs('author12@example.com');
+    const { product: productA, review: reviewA } = await seedReviewBy('author12@example.com', {
+      status: 'PENDING' as ReviewStatus,
+    });
+    const { review: reviewB } = await seedReviewBy('author12@example.com', { status: 'APPROVED' as ReviewStatus });
+
+    const res = await ctx.request
+      .get(`/api/v1/me/reviews?productId=${productA.id}`)
+      .auth(token, { type: 'bearer' })
+      .expect(200);
+    const items = (res.body as MyReviewsBody).items;
+
+    expect(items.map((r) => r.id)).toEqual([reviewA.id]);
+    expect(items.map((r) => r.id)).not.toContain(reviewB.id);
+  });
+
+  it('returns an empty list, not an error, for a product the caller has not reviewed', async () => {
+    const token = await ctx.loginAs('author13@example.com');
+    await seedReviewBy('author13@example.com', { status: 'PENDING' as ReviewStatus });
+    const otherProduct = await createProduct(ctx.prisma);
+
+    const res = await ctx.request
+      .get(`/api/v1/me/reviews?productId=${otherProduct.id}`)
+      .auth(token, { type: 'bearer' })
+      .expect(200);
+
+    expect((res.body as MyReviewsBody).items).toEqual([]);
+  });
+
+  it('rejects a malformed productId with 400 rather than an empty result', async () => {
+    const token = await ctx.loginAs('author14@example.com');
+
+    await ctx.request.get('/api/v1/me/reviews?productId=not-a-uuid').auth(token, { type: 'bearer' }).expect(400);
+  });
 });

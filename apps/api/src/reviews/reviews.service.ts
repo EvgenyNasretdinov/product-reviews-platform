@@ -39,6 +39,8 @@ export interface ListReviewsQuery {
 
 export interface ListMineQuery {
   authorId: string;
+  /** Narrows the result to the caller's review of one product, if any. */
+  productId?: string;
   cursor?: string;
   limit: number;
 }
@@ -217,6 +219,13 @@ export class ReviewsService {
    * `moderationReason`, unlike the public `list` above, which always nulls
    * it. See reviews.mapper.ts for that contrast.
    *
+   * `query.productId`, when given, narrows this to the caller's review of
+   * one product — see `ReviewsRepository.listByAuthor`'s doc comment for
+   * why that's one more predicate on the same query rather than a second
+   * code path. This is what the web app's "have I already reviewed this
+   * product" check asks for, rather than paging through the caller's whole
+   * history client-side to find one match.
+   *
    * Cursor-paginated like every other listing in this codebase, scoped
    * `'me-reviews'` so a cursor minted here can never be replayed against
    * `list` or the moderation queue's cursor — see cursor.ts. Previously
@@ -229,6 +238,7 @@ export class ReviewsService {
 
     const { rows, hasMore } = await this.repository.listByAuthor({
       authorId: query.authorId,
+      productId: query.productId,
       limit: query.limit,
       cursor,
     });

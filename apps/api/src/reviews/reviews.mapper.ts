@@ -1,5 +1,5 @@
-import type { ReviewDto } from '@reviews/contracts';
-import type { ReviewWithAuthor } from './reviews.repository.js';
+import type { ModerationReviewDto, ReviewDto } from '@reviews/contracts';
+import type { ReviewWithAuthor, ReviewWithAuthorAndProduct } from './reviews.repository.js';
 
 /** Converts a `reviews` row joined with its author into the wire DTO. */
 export function toReviewDto(row: ReviewWithAuthor): ReviewDto {
@@ -36,4 +36,18 @@ export function toReviewDto(row: ReviewWithAuthor): ReviewDto {
  */
 export function toPublicReviewDto(row: ReviewWithAuthor): ReviewDto {
   return { ...toReviewDto(row), moderationReason: null };
+}
+
+/**
+ * `toReviewDto` plus the product's own `name`/`slug` — the moderation
+ * queue's own mapper, backing `moderationReviewDtoSchema`
+ * (`@reviews/contracts`). Not a variant every review listing gets: see
+ * that schema's doc comment for why the product only belongs on the one
+ * listing that spans many products at once.
+ */
+export function toModerationReviewDto(row: ReviewWithAuthorAndProduct): ModerationReviewDto {
+  return {
+    ...toReviewDto(row),
+    product: { name: row.product.name, slug: row.product.slug },
+  };
 }

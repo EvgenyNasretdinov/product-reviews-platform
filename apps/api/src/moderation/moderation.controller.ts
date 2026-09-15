@@ -57,7 +57,11 @@ export class ModerationController {
   constructor(private readonly moderationService: ModerationService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List the moderation queue (MODERATOR only)' })
+  @ApiOperation({
+    summary: 'List the moderation queue (MODERATOR only)',
+    description:
+      'Each item is the full review — body, author, rating — plus the product it belongs to (name and slug), since this listing spans many products at once and a moderator needs that context to judge a review. See ModerationQueueResponseDto.',
+  })
   @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'APPROVED', 'REJECTED', 'FLAGGED'], description: 'Defaults to "FLAGGED".' })
   @ApiQuery({ name: 'cursor', required: false, type: String, description: 'Opaque pagination cursor from a previous page.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size, 1-100 (default 20).' })

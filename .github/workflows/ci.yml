@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel a superseded run on the same ref (e.g. a second push to the same
+# PR) rather than let both run to completion and race for the same
+# feedback.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: '.nvmrc', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test:unit
+
+  integration:
+    name: Integration tests (Testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: '.nvmrc', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile
+      # --concurrency=1 is not a style preference: parallel integration
+      # suites race on the generated Prisma client (a sibling suite can
+      # have it loaded while `prisma generate` rewrites it), which was
+      # confirmed as the cause of intermittent failures in this repo.
+      # Serialising took a reproducible flake rate to zero across five
+      # local runs; the plain `pnpm test:integration` script does not
+      # pass this flag and must not be used here.
+      - run: pnpm turbo run test:integration --concurrency=1
+        env:
+          # Runners are single-use VMs that are destroyed right after the
+          # job, so there is nothing left for the reaper to clean up and
+          # no benefit to running it — only one more container to start
+          # and one more thing that can itself fail to start under
+          # constrained CI resources. Disabled for that reason, not
+          # because Ryuk is harmful.
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
+
+  e2e:
+    name: End-to-end (Compose + Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: '.nvmrc', cache: 'pnpm' }
+      - run: pnpm install --frozen-lockfile
+      # Builds every image on a fresh runner (nothing is pre-pulled or
+      # cached) and waits for every service's own healthcheck, including
+      # the one-shot migrate container that api/worker depend on via
+      # service_completed_successfully.
+      - run: docker compose up -d --wait
+      - run: ./scripts/smoke.sh
+      # Plain `pnpm exec playwright ...` from the repo root fails here
+      # (ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL) because @playwright/test is a
+      # devDependency scoped to apps/web, not hoisted to the workspace
+      # root — verified locally. `--filter` runs it in that package.
+      - run: pnpm --filter @reviews/web exec playwright install --with-deps chromium
+      # playwright.config.ts's webServer block is skipped whenever CI is
+      # set, so this runs against the Compose stack's published ports
+      # (3000/3001) instead of trying to start a second web server.
+      - run: pnpm test:e2e
+      # Uploaded on success too, not only on failure. Playwright retries a
+      # failed test before giving up, so a test that failed once and passed
+      # on the retry leaves a green job behind; without the report there is
+      # no way to find out it happened. A flaky pass should cost the same
+      # evidence as a red one.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report
+          retention-days: 7
+      - if: always()
+        run: docker compose logs --no-color > compose-logs.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+          retention-days: 7

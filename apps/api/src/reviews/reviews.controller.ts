@@ -202,12 +202,16 @@ export class ReviewManagementController {
 }
 
 /**
- * `cursor` and `limit` are validated by hand through this schema — the
- * same reason `listReviewsQuerySchema` above is. No `sort`/`rating`: this
- * listing has exactly one order (newest first, see
- * `ReviewsRepository.listByAuthor`) and no filter.
+ * `productId`, `cursor`, and `limit` are validated by hand through this
+ * schema — the same reason `listReviewsQuerySchema` above is. No `sort`:
+ * this listing has exactly one order (newest first, see
+ * `ReviewsRepository.listByAuthor`). `productId` is the one filter it
+ * takes, validated as a uuid so a malformed value is a 400 rather than a
+ * silently-empty `items: []` that would read as "you haven't reviewed
+ * this" instead of "that wasn't a valid id".
  */
 const listMineQuerySchema = z.object({
+  productId: z.string().uuid().optional(),
   cursor: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
@@ -234,10 +238,11 @@ export class MyReviewsController {
    */
   @Get()
   @ApiOperation({ summary: 'List every review the caller has authored, in every status' })
+  @ApiQuery({ name: 'productId', required: false, type: String, format: 'uuid', description: 'Narrow to the review the caller wrote for one product, if any.' })
   @ApiQuery({ name: 'cursor', required: false, type: String, description: 'Opaque pagination cursor from a previous page.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size, 1-100 (default 20).' })
   @ApiResponse({ status: 200, type: ReviewListResponseDto })
-  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid query parameters.' })
+  @ApiResponse({ status: 400, type: ErrorResponseDto, description: 'Invalid query parameters, including a malformed productId.' })
   @ApiResponse({ status: 401, type: ErrorResponseDto, description: 'Missing, expired, or invalid bearer token.' })
   async listMine(@Query() query: unknown, @CurrentUser() user: AuthenticatedUser): Promise<ListReviewsResult> {
     const parsed = listMineQuerySchema.safeParse(query);

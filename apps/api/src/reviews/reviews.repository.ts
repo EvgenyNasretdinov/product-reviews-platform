@@ -7,6 +7,18 @@ import { PrismaService } from '../common/prisma/prisma.service.js';
 /** A review row joined with the author fields the DTO exposes. */
 export type ReviewWithAuthor = Review & { author: { id: string; displayName: string } };
 
+/**
+ * `ReviewWithAuthor` plus the product's own `name`/`slug` — only
+ * `listQueue` below returns this. The moderation queue is the one
+ * listing that spans many products at once (a moderator works through
+ * everything flagged or pending, not one product's reviews), so it's the
+ * one place a bare `productId` isn't enough context to judge a review by
+ * — see `moderationReviewDtoSchema`'s doc comment in `@reviews/contracts`
+ * for why this isn't just folded into `ReviewWithAuthor` for every
+ * listing.
+ */
+export type ReviewWithAuthorAndProduct = ReviewWithAuthor & { product: { name: string; slug: string } };
+
 /** The Prisma column a public sort order paginates on — see {@link SORTS}. */
 type SortColumn = 'helpfulCount' | 'createdAt' | 'rating';
 
@@ -118,6 +130,20 @@ export interface VoteCounts {
 }
 
 /**
+ * `VoteCounts` plus the id of the product the voted-on review belongs to.
+ * `castVote` already reads this off the same locked row it checks
+ * `status`/`authorId` on — this is that field, surfaced rather than
+ * dropped, so `VotesService` can invalidate the product's review-list
+ * cache without a second query. Never returned to an HTTP caller as-is:
+ * `VotesController#vote` still only ever sends `VoteCounts`'s two fields
+ * (see `VoteCountsResponseDto`) — `productId` is for `VotesService`'s own
+ * use, not part of the public response shape.
+ */
+export interface VoteMutationResult extends VoteCounts {
+  productId: string;
+}
+
+/**
  * Thrown from inside {@link ReviewsRepository.submit}'s transaction when
  * `productId` doesn't reference a real product. Deliberately a plain
  * `Error`, not a NestJS `HttpException`: this repository owns every Prisma
@@ -212,12 +238,14 @@ export interface ModerationQueueParams {
 
 export interface ModerationQueuePage {
   /** At most `limit` rows — see {@link ListApprovedReviewsPage} for why. */
-  rows: ReviewWithAuthor[];
+  rows: ReviewWithAuthorAndProduct[];
   hasMore: boolean;
 }
 
 export interface ListByAuthorParams {
   authorId: string;
+  /** Narrows to one product's review — see {@link listByAuthor}'s doc comment. */
+  productId?: string;
   limit: number;
   cursor?: { key: string; id: string };
 }
@@ -399,7 +427,7 @@ export class ReviewsRepository {
    * {@link lockReviewRow}'s doc comment for why acquiring it afterward
    * deadlocks under concurrency instead of merely serialising.
    */
-  async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteCounts> {
+  async castVote(reviewId: string, userId: string, value: VoteValue): Promise<VoteMutationResult> {
     return this.prisma.$transaction(async (tx) => {
       const review = await lockReviewRow(tx, reviewId);
       if (!review || review.status !== 'APPROVED') {
@@ -415,7 +443,13 @@ export class ReviewsRepository {
         update: { value },
       });
 
-      return recomputeVoteCounts(tx, reviewId);
+      const counts = await recomputeVoteCounts(tx, reviewId);
+      // `review.productId` is the same locked row already read above for
+      // the status/author checks — surfaced here rather than re-queried,
+      // so `VotesService` can invalidate that product's review-list cache
+      // (see its doc comment) without a second round trip to find out
+      // which product this review even belongs to.
+      return { ...counts, productId: review.productId };
     });
   }
 
@@ -433,15 +467,21 @@ export class ReviewsRepository {
    * `204` unconditionally rather than surfacing a 404 here. `deleteMany`
    * (not `delete`) is what makes the "no such vote" case a no-op instead of
    * Prisma's `P2025`.
+   *
+   * Returns the locked row's `productId` so `VotesService` can invalidate
+   * that product's review-list cache the same way `castVote` does — or
+   * `null` when `reviewId` matched no row at all, the one case where
+   * there is no product, and nothing changed, to invalidate for.
    */
-  async removeVote(reviewId: string, userId: string): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      // The locked row's fields aren't needed here — removeVote never
-      // checks the review's status or author (see this method's own doc
-      // comment above) — so the return value is discarded.
-      await lockReviewRow(tx, reviewId);
+  async removeVote(reviewId: string, userId: string): Promise<string | null> {
+    return this.prisma.$transaction(async (tx) => {
+      // The locked row's status/author aren't needed here — removeVote
+      // never checks either (see this method's own doc comment above) —
+      // only `productId` is, for the cache invalidation described above.
+      const review = await lockReviewRow(tx, reviewId);
       await tx.reviewVote.deleteMany({ where: { reviewId, userId } });
       await recomputeVoteCounts(tx, reviewId);
+      return review?.productId ?? null;
     });
   }
 
@@ -562,12 +602,19 @@ export class ReviewsRepository {
   /**
    * Keyset pagination over every review `params.authorId` has written, in
    * every status, newest first — the backing query for `GET /me/reviews`.
-   * No `productId` filter and no `status: 'APPROVED'` filter: unlike
-   * {@link listApproved}, this is the author reading their own work, so a
-   * `PENDING`/`REJECTED`/`FLAGGED` row (and, on a rejected one, its
-   * `moderationReason`) is exactly what should come back — see
-   * reviews.mapper.ts's `toReviewDto` vs `toPublicReviewDto` for the two
-   * paths this deliberately keeps apart.
+   * No `status: 'APPROVED'` filter: unlike {@link listApproved}, this is
+   * the author reading their own work, so a `PENDING`/`REJECTED`/`FLAGGED`
+   * row (and, on a rejected one, its `moderationReason`) is exactly what
+   * should come back — see reviews.mapper.ts's `toReviewDto` vs
+   * `toPublicReviewDto` for the two paths this deliberately keeps apart.
+   *
+   * `params.productId`, when given, narrows this to the caller's review of
+   * one product — the "have I already reviewed this?" question the web
+   * app's product page asks. It's one more predicate in the same `AND`,
+   * not a second query path: `UNIQUE(product_id, author_id)` means at most
+   * one row can ever match both, so this never returns more than one item
+   * when `productId` is set, but the response shape (and its cursor) stays
+   * identical to the unfiltered call either way.
    *
    * Reuses `SORTS.newest`'s `orderBy` and `cursorWhere('newest', …)`'s
    * `WHERE` fragment, the same way {@link listQueue} does — this listing
@@ -583,9 +630,12 @@ export class ReviewsRepository {
    * listing in this codebase.
    */
   async listByAuthor(params: ListByAuthorParams): Promise<ListByAuthorPage> {
-    const { authorId, limit, cursor } = params;
+    const { authorId, productId, limit, cursor } = params;
 
     const conditions: Prisma.ReviewWhereInput[] = [{ authorId }];
+    if (productId) {
+      conditions.push({ productId });
+    }
     if (cursor) {
       conditions.push(cursorWhere('newest', cursor.key, cursor.id));
     }
@@ -616,6 +666,12 @@ export class ReviewsRepository {
    * `body`) comes back: a moderator cannot judge an excerpt, so this is
    * the one listing in the codebase that doesn't need `toPublicReviewDto`'s
    * trimming.
+   *
+   * Also joins `product` (`name`/`slug` only) — a single join on
+   * `Review.productId`, an indexed foreign key, on an endpoint a handful
+   * of moderators hit. This is the one listing that spans many products
+   * at once, so it's the one place a bare `productId` isn't enough
+   * context on its own; see `ReviewWithAuthorAndProduct`'s doc comment.
    */
   async listQueue(params: ModerationQueueParams): Promise<ModerationQueuePage> {
     const { status, limit, cursor } = params;
@@ -629,7 +685,10 @@ export class ReviewsRepository {
       where: { AND: conditions },
       orderBy: SORTS.newest.orderBy,
       take: limit + 1,
-      include: { author: { select: { id: true, displayName: true } } },
+      include: {
+        author: { select: { id: true, displayName: true } },
+        product: { select: { name: true, slug: true } },
+      },
     });
 
     const hasMore = rows.length > limit;

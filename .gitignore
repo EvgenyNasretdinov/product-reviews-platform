@@ -10,3 +10,6 @@ coverage/
 .DS_Store
 .prisma-generate.lock
 .superpowers/
+playwright-report/
+test-results/
+blob-report/
