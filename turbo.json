@@ -4,7 +4,7 @@
     "generate": { "cache": false, "outputs": [] },
     "build": { "dependsOn": ["^build", "@reviews/db#generate"], "outputs": ["dist/**", ".next/**", "!.next/cache/**"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "lint": {},
+    "lint": { "dependsOn": ["^build", "@reviews/db#generate"] },
     "test:unit": { "dependsOn": ["^build", "@reviews/db#generate"] },
     "test:integration": { "dependsOn": ["^build", "@reviews/db#generate"], "cache": false },
     "@reviews/worker#test:integration": {
