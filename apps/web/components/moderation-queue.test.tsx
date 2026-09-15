@@ -2,13 +2,14 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import type { ReviewDto } from '@reviews/contracts';
+import type { ModerationReviewDto } from '@reviews/contracts';
 import { ModerationQueue } from './moderation-queue';
 
-function buildReview(overrides: Partial<ReviewDto> = {}): ReviewDto {
+function buildReview(overrides: Partial<ModerationReviewDto> = {}): ModerationReviewDto {
   return {
     id: 'review-1',
     productId: 'product-1',
+    product: { name: 'Aurora Desk Lamp', slug: 'aurora-desk-lamp' },
     author: { id: 'author-1', displayName: 'Liam O’Connor' },
     rating: 1,
     title: 'Would not recommend',
@@ -25,15 +26,38 @@ function buildReview(overrides: Partial<ReviewDto> = {}): ReviewDto {
 }
 
 describe('ModerationQueue', () => {
-  it("renders each review's full body, product id, author, rating, and the reason it was flagged", () => {
+  it("renders each review's full body, product, author, rating, and the reason it was flagged", () => {
     const review = buildReview();
     render(<ModerationQueue reviews={[review]} onDecide={vi.fn()} />);
 
     expect(screen.getByText(review.body)).toBeInTheDocument();
-    expect(screen.getByText(review.productId)).toBeInTheDocument();
     expect(screen.getByText(review.author.displayName)).toBeInTheDocument();
     expect(screen.getByText(/suspicious external link/i)).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /1 out of 5 stars/i })).toBeInTheDocument();
+
+    // The product: shown by name (not a bare id), linked to its own page
+    // so a moderator can see this review in context in one click.
+    const productLink = screen.getByRole('link', { name: review.product.name });
+    expect(productLink).toHaveAttribute('href', `/products/${review.product.slug}`);
+  });
+
+  it("links each review's product row to that review's own product, not a shared one", () => {
+    const lamp = buildReview({ id: 'review-lamp', product: { name: 'Aurora Desk Lamp', slug: 'aurora-desk-lamp' } });
+    const kettle = buildReview({
+      id: 'review-kettle',
+      title: 'Leaks from the base',
+      product: { name: 'Steel Electric Kettle', slug: 'steel-electric-kettle' },
+    });
+    render(<ModerationQueue reviews={[lamp, kettle]} onDecide={vi.fn()} />);
+
+    expect(screen.getByRole('link', { name: 'Aurora Desk Lamp' })).toHaveAttribute(
+      'href',
+      '/products/aurora-desk-lamp',
+    );
+    expect(screen.getByRole('link', { name: 'Steel Electric Kettle' })).toHaveAttribute(
+      'href',
+      '/products/steel-electric-kettle',
+    );
   });
 
   it('omits the flagged-reason panel for a review with no moderation reason', () => {

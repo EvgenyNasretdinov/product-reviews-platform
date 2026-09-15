@@ -2,18 +2,27 @@
 
 import { useInfiniteQuery, useMutation, useQueryClient, type InfiniteData, type QueryKey } from '@tanstack/react-query';
 import {
+  moderationReviewDtoSchema,
   paginatedSchema,
   reviewDtoSchema,
   type ModerationDecisionInput,
+  type ModerationReviewDto,
   type ReviewDto,
   type ReviewStatus,
 } from '@reviews/contracts';
 import { ApiError } from '@/lib/errors';
 
-const moderationQueueSchema = paginatedSchema(reviewDtoSchema);
+// `moderationReviewDtoSchema`, not `reviewDtoSchema`: the queue carries
+// each review's `product` (name/slug) too — see that schema's doc comment
+// (@reviews/contracts) for why only this listing does. The decision
+// mutation below still validates its response against plain
+// `reviewDtoSchema`: `POST /moderation/reviews/:id` returns the single
+// decided review, not a queue page, and never carried `product` in the
+// first place.
+const moderationQueueSchema = paginatedSchema(moderationReviewDtoSchema);
 
 interface ModerationQueuePage {
-  items: ReviewDto[];
+  items: ModerationReviewDto[];
   nextCursor: string | null;
 }
 

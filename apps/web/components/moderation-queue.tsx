@@ -1,15 +1,16 @@
 'use client';
 
 import { useState, type ReactNode } from 'react';
-import type { ModerationDecisionInput, ReviewDto } from '@reviews/contracts';
+import Link from 'next/link';
+import type { ModerationDecisionInput, ModerationReviewDto } from '@reviews/contracts';
 import { EmptyState } from '@/components/empty-state';
 import { ModerationDecisionDialog } from '@/components/moderation-decision-dialog';
 import { RatingStars } from '@/components/rating-stars';
 import { Button } from '@/components/ui/button';
 
 export interface ModerationQueueProps {
-  /** Every review currently awaiting this queue's decision — full body and `moderationReason` included, unlike the public list's `ReviewDto`. See this file's own doc comment for why that means `ReviewItem` isn't reused here. */
-  reviews: ReviewDto[];
+  /** Every review currently awaiting this queue's decision — full body, `moderationReason`, and the product it's about, unlike the public list's `ReviewDto`. See this file's own doc comment for why that means `ReviewItem` isn't reused here. */
+  reviews: ModerationReviewDto[];
   /**
    * Records the decision. Takes the same two fields
    * `moderationDecisionInputSchema` requires — `decision` and a nullable
@@ -52,17 +53,21 @@ function withoutKey(record: Record<string, string>, key: string): Record<string,
  * either widening that type back out (reopening the exact leak it exists
  * to prevent) or forking its render logic anyway. A moderator's row is
  * a different thing, showing different data, to a different reader; this
- * component is that thing, built from a plain `ReviewDto` (which already
- * carries `moderationReason` honestly for a queue endpoint) rather than
- * from any narrowed or invented type.
+ * component is that thing, built from `ModerationReviewDto`
+ * (`@reviews/contracts`) — `ReviewDto` plus `product`, both of them shared
+ * contract types, not anything invented for this component alone.
  *
- * `productId` is shown as-is rather than a product name: `ReviewDto` (the
- * one contract this queue is allowed to read) carries only `productId`
- * — no `ProductDto` join — and the public product-lookup endpoint takes a
- * slug, not an id, so there is no existing call that could resolve one
- * into the other without adding a new API surface this task's file list
- * doesn't include. Showing the id plainly is the honest choice given
- * that gap, not a placeholder for something better.
+ * The product is shown by name, linked to its own page — a moderator
+ * deciding whether a borderline review should be published needs to know
+ * it's about a desk lamp, not a coffee machine, since tone, vocabulary,
+ * and plausibility all read differently against the product it's for. A
+ * bare `productId` couldn't offer that (see this project's git history:
+ * an earlier version of this component showed the id, before
+ * `ModerationReviewDto` added `product`). This queue is the one place a
+ * review carries that context at all — `ReviewItem`'s `PublicReview` and
+ * the plain `ReviewDto` a moderator's own decision response comes back as
+ * both still have only `productId`, because the public list is already
+ * read from the product's own page and doesn't need it repeated.
  *
  * Approving is a single action — a moderator does not need to explain why
  * something was fine. Rejecting opens `ModerationDecisionDialog`, a real
@@ -92,7 +97,7 @@ export function ModerationQueue({
   const [removedIds, setRemovedIds] = useState<ReadonlySet<string>>(new Set());
   const [pendingApprovalId, setPendingApprovalId] = useState<string | null>(null);
   const [approveErrors, setApproveErrors] = useState<Record<string, string>>({});
-  const [rejectTarget, setRejectTarget] = useState<ReviewDto | null>(null);
+  const [rejectTarget, setRejectTarget] = useState<ModerationReviewDto | null>(null);
 
   const visibleReviews = reviews.filter((review) => !removedIds.has(review.id));
 
@@ -104,7 +109,7 @@ export function ModerationQueue({
     });
   }
 
-  async function handleApprove(review: ReviewDto): Promise<void> {
+  async function handleApprove(review: ModerationReviewDto): Promise<void> {
     setApproveErrors((current) => withoutKey(current, review.id));
     setPendingApprovalId(review.id);
     try {
@@ -155,9 +160,16 @@ export function ModerationQueue({
               <span aria-hidden="true">·</span>
               <time dateTime={review.createdAt.toISOString()}>{formatDate(review.createdAt)}</time>
               <span aria-hidden="true">·</span>
-              <span>
-                Product ID: <span className="font-mono">{review.productId}</span>
-              </span>
+              {/* Linked to the product's own page — the one thing a bare
+                  id could never give a moderator: seeing this review in
+                  context, next to every other review this same product
+                  already has, in one click. */}
+              <Link
+                href={`/products/${review.product.slug}`}
+                className="font-medium text-foreground underline-offset-4 hover:underline"
+              >
+                {review.product.name}
+              </Link>
             </div>
 
             <p className="text-sm text-foreground/90">{review.body}</p>
