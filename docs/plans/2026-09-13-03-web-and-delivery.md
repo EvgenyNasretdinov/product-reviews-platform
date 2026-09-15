@@ -766,8 +766,8 @@ Then walk through every numbered step of "Try the interesting bits" and confirm 
 
 - [ ] **Step 4: Check for stray references**
 
-Run: `grep -rniE '<company-name>|<recruiter-name>|assignment|interview|candidate' --exclude-dir=node_modules --exclude-dir=.git .`
-Expected: no matches. The repository is public and must read as a project, not as a submission.
+Run: `git grep -niE 'assignment|interview|candidate|recruiter|home[ -]task'`
+Expected: no matches other than the known `candidate` local variables. The repository is public and must read as a project, not as a submission.
 
 - [ ] **Step 5: Commit**
 
@@ -795,7 +795,7 @@ warrants and what would justify simplifying it."
 
 ## Plan 3 self-review
 
-**Spec coverage.** §8 frontend: catalogue → Task 2; product detail with histogram filter and sort → Task 3; submission and the pending-review panel → Task 4; voting → Task 5; moderation queue → Task 6; httpOnly cookie session → Task 1. §9 E2E → Task 7. The "easy to set up" requirement from the assignment brief → Task 8, verified by a smoke script rather than asserted. CI → Task 9. The documentation requirement → Task 10, with a verification step that runs the quick start from a clean clone.
+**Spec coverage.** §8 frontend: catalogue → Task 2; product detail with histogram filter and sort → Task 3; submission and the pending-review panel → Task 4; voting → Task 5; moderation queue → Task 6; httpOnly cookie session → Task 1. §9 E2E → Task 7. The "easy to set up" requirement from the project's stated grading criteria → Task 8, verified by a smoke script rather than asserted. CI → Task 9. The documentation requirement → Task 10, with a verification step that runs the quick start from a clean clone.
 
 **Placeholder scan.** No task defers work to a later unnamed change. Each test list names concrete cases with concrete expected values; the two places using prose rather than literal code (Task 6's queue cases, Task 3's list states) enumerate exact states and behaviours rather than saying "handle edge cases".
 

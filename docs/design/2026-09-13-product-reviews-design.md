@@ -3,6 +3,11 @@
 Date: 2026-09-13
 Status: Approved, ready for implementation planning
 
+This document asserts the decisions; `docs/adr/` records why, including the
+alternative each one rejected — read those for the reasoning behind the
+outbox, the recomputed projections, cursor pagination, the process split,
+and the identity-column migration detail.
+
 ## 1. Purpose and scope
 
 A product reviews system in the spirit of Amazon or Alza: shoppers browse products,
