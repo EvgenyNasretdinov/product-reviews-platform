@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import type { VoteValue } from '@reviews/contracts';
 import { cn } from '@/lib/utils';
@@ -36,7 +36,19 @@ export interface VoteButtonsProps {
 interface LocalVoteState {
   helpfulCount: number;
   notHelpfulCount: number;
-  /** This component's own belief about the caller's vote — see the doc comment on `onVote` above. */
+  /**
+   * This component's own belief about the caller's vote — see the doc
+   * comment on `onVote` above. Always starts `null` on mount, including on
+   * every reload: nothing in `ReviewDto`/`VoteCountsResponseDto` reports a
+   * per-user vote on any read (the review list is fetched without knowing
+   * who's asking), so there is no truth to initialise this from. That's a
+   * known, deliberate gap — see the README's "what I would do next" —
+   * closing it properly would mean adding the caller's own vote to the
+   * (currently `@Public()`, no-auth-required) review list response, which
+   * needs optional authentication on that route, a contract change, and
+   * updated OpenAPI docs/tests. Showing neither button pressed after a
+   * reload is the honest state given that gap: guessing would be worse.
+   */
   activeVote: VoteValue | null;
 }
 
@@ -83,6 +95,42 @@ export function VoteButtons({
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errorId = `vote-error-${reviewId}`;
+
+  // `useState`'s initializer above runs exactly once, at mount — but
+  // ReviewList keys ReviewItem by review.id (see review-list.tsx), so a
+  // refetch (in particular useVote's own onSettled invalidation, once it
+  // lands) re-renders this *same* instance with new `helpfulCount`/
+  // `notHelpfulCount` props rather than remounting it. Without this
+  // effect those new props would be read once and then ignored forever:
+  // the displayed counts would stay frozen at whichever optimistic guess
+  // this component last made, even after the mutation that guess was
+  // covering for has already settled and the true count is sitting right
+  // there in props. This effect is what actually lets that settle-then-
+  // refetch round trip reach the screen.
+  //
+  // The dependency array deliberately does *not* include `isPending`: it
+  // is read only as a guard inside the effect body, never as a trigger.
+  // If it were also a dependency, every click would re-run this effect
+  // twice for nothing but the pending flag's own true→false flip — once
+  // when the click starts (skipped, correctly, by the guard) and once the
+  // instant `onVote` settles, at which point the effect would fire again
+  // even though `helpfulCount`/`notHelpfulCount` themselves never changed,
+  // reapplying those still-stale closed-over prop values straight over
+  // the optimistic count `handleClick` just committed — undoing a
+  // successful vote's own display the moment it finishes, before any
+  // refetch had a chance to bring back the real number. Keying this
+  // purely on the *props actually changing* is what keeps it a pure
+  // "did new truth arrive" listener instead of a second, competing writer
+  // to the same state `handleClick` owns. Leaves `activeVote` untouched
+  // either way: this component still knows which button *it* just
+  // pressed, even once the counts underneath catch up to a value someone
+  // else's vote may also have touched.
+  useEffect(() => {
+    if (isPending) {
+      return;
+    }
+    setState((current) => ({ ...current, helpfulCount, notHelpfulCount }));
+  }, [helpfulCount, notHelpfulCount]);
 
   async function handleClick(target: VoteValue): Promise<void> {
     const previous = state;

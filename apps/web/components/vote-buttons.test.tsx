@@ -70,6 +70,51 @@ describe('VoteButtons', () => {
     expect(onVote).toHaveBeenLastCalledWith('NOT_HELPFUL', 'HELPFUL');
   });
 
+  it('re-renders with new counts once no vote is in flight — the settle-refetch convergence path', () => {
+    const { rerender } = render(
+      <VoteButtons reviewId="r1" helpfulCount={3} notHelpfulCount={0} onVote={vi.fn()} canVote />,
+    );
+
+    // Simulates the same ReviewItem instance re-rendering with fresh props
+    // after useVote's onSettled invalidation refetches — no click, no
+    // remount, just new props on the same mounted component.
+    rerender(<VoteButtons reviewId="r1" helpfulCount={5} notHelpfulCount={2} onVote={vi.fn()} canVote />);
+
+    const helpfulButton = screen.getByRole('button', { name: /helpful/i });
+    const notUsefulButton = screen.getByRole('button', { name: /not useful/i });
+    expect(within(helpfulButton).getByText('5')).toBeInTheDocument();
+    expect(within(notUsefulButton).getByText('2')).toBeInTheDocument();
+  });
+
+  it('does not let a prop update landing mid-flight clobber the optimistic count of the click still in progress', async () => {
+    let resolveVote: (() => void) | undefined;
+    const onVote = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveVote = resolve;
+        }),
+    );
+    const { rerender } = render(
+      <VoteButtons reviewId="r1" helpfulCount={3} notHelpfulCount={0} onVote={onVote} canVote />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /helpful/i }));
+    expect(within(screen.getByRole('button', { name: /helpful/i })).getByText('4')).toBeInTheDocument();
+
+    // An unrelated prop update (e.g. a background refetch triggered by
+    // something other than this click, changing the *other* counter)
+    // arrives while this click's own request is still pending. It must
+    // not overwrite the optimistic helpful count "4" with the pre-click
+    // "3" it would otherwise resync to.
+    rerender(<VoteButtons reviewId="r1" helpfulCount={3} notHelpfulCount={9} onVote={onVote} canVote />);
+    expect(within(screen.getByRole('button', { name: /helpful/i })).getByText('4')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveVote?.();
+      await Promise.resolve();
+    });
+  });
+
   it('rolls the count back when the request fails', async () => {
     const vote = vi.fn().mockRejectedValue(new ApiError(500, 'boom'));
     render(<VoteButtons reviewId="r1" helpfulCount={4} notHelpfulCount={0} onVote={vote} canVote />);
