@@ -79,7 +79,12 @@ jobs:
       # set, so this runs against the Compose stack's published ports
       # (3000/3001) instead of trying to start a second web server.
       - run: pnpm test:e2e
-      - if: failure()
+      # Uploaded on success too, not only on failure. Playwright retries a
+      # failed test before giving up, so a test that failed once and passed
+      # on the retry leaves a green job behind; without the report there is
+      # no way to find out it happened. A flaky pass should cost the same
+      # evidence as a red one.
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report

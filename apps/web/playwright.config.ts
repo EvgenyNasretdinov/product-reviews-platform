@@ -16,7 +16,12 @@ export default defineConfig({
   globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
+  // One retry, not two. These specs have never run on CI, so there is no
+  // measured flake rate to justify a wider margin — but "no data" is not
+  // the same as "provably zero", and a red first run for an undiagnosed
+  // reason is worse than absorbing one retry. The report is uploaded on
+  // success as well as failure, so a retried pass still leaves a trace.
+  retries: process.env.CI ? 1 : 0,
   workers: 1,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   use: {
