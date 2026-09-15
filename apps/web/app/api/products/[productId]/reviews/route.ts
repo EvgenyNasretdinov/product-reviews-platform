@@ -16,11 +16,15 @@ interface RouteContext {
  *
  * Talks to the API with a raw `fetch`, not `apiFetch`: `apiFetch`'s
  * `ApiError` only ever carries `{ message, code }` (see lib/api-client.ts),
- * which would silently drop the 409 response's `reviewId` and the 429
- * response's numeric `Retry-After` header — both load-bearing for how the
- * client explains those two failures in place (see
- * hooks/use-submit-review.ts). Passing the upstream body and that one
- * header through untouched is what keeps them intact.
+ * which would silently drop the 429 response's numeric `Retry-After`
+ * header — load-bearing for how the client explains that failure in
+ * place (see hooks/use-submit-review.ts, which reads it back off this
+ * response). The upstream body itself is forwarded verbatim rather than
+ * re-serialised, so every field the API put in it (including the 409
+ * body's `reviewId`, which nothing on the web side currently reads —
+ * see `ReviewConflictError`'s doc comment) survives the trip unchanged;
+ * that's a side effect of proxying the body untouched, not something
+ * this route singles out `reviewId` to preserve.
  */
 export async function POST(request: Request, { params }: RouteContext): Promise<NextResponse> {
   const { productId } = await params;

@@ -2,8 +2,26 @@ import type { ReactNode } from 'react';
 import type { ReviewDto } from '@reviews/contracts';
 import { RatingStars } from '@/components/rating-stars';
 
+/**
+ * `ReviewDto` minus `moderationReason` — the type this component actually
+ * accepts. The API already nulls that field before a public review ever
+ * reaches the browser (see `toPublicReviewDto` in apps/api's
+ * reviews.service.ts), but a null value flowing through at runtime isn't
+ * what stops it from rendering here: nothing about a plain `ReviewDto`
+ * prop would stop a future edit from adding `{review.moderationReason}`
+ * to this component's JSX, and nothing in this component's own tests
+ * would catch that. Typing the prop as `Omit<ReviewDto, 'moderationReason'>`
+ * makes that edit fail to compile instead — the property simply isn't on
+ * the type this component has. A `ReviewDto` is still assignable here
+ * (structural typing: it has every field this narrower type asks for,
+ * `moderationReason` is just extra baggage TypeScript doesn't mind
+ * carrying past a non-literal call site), so `ReviewList` passing
+ * `review: ReviewDto` straight through needs no change.
+ */
+export type PublicReview = Omit<ReviewDto, 'moderationReason'>;
+
 interface ReviewItemProps {
-  review: ReviewDto;
+  review: PublicReview;
 }
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', { dateStyle: 'long' });

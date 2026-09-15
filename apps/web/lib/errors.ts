@@ -25,23 +25,26 @@ export class ApiError extends Error {
 
 /**
  * A 409 from `POST /products/:productId/reviews` specifically — see
- * reviews.controller.ts's doc comment on `submit`. Its body carries a
- * `reviewId` pointing at the review that already exists, which is what
- * lets a caller navigate the author straight to it rather than just
- * telling them submission failed. That field doesn't belong on plain
- * `ApiError` (every other caller of `apiFetch` would have to know it
- * might be `undefined`); it lives here instead, on a type only review
- * submission ever throws. `error instanceof ApiError` and
+ * reviews.controller.ts's doc comment on `submit`. Distinguished from a
+ * plain `ApiError` purely so a caller can `instanceof`-check for this one
+ * failure mode without comparing `error.status === 409` by hand (see
+ * `useSubmitReview`'s `onError`, which does exactly that to refetch the
+ * caller's own review list). `error instanceof ApiError` and
  * `error.status === 409` both still work unchanged on this, since it
  * extends `ApiError` rather than replacing it.
+ *
+ * The 409 body also carries a `reviewId` pointing at the review that
+ * already exists (see `ReviewConflictResponseDto`), but nothing on the
+ * web side reads it — the "Your review" panel that appears once
+ * `useSubmitReview` invalidates the caller's review query already shows
+ * that same review, so there's nowhere better an id would send anyone.
+ * Deliberately not carried onto this type: an unused field invites the
+ * next reader to assume it's load-bearing when it isn't.
  */
 export class ReviewConflictError extends ApiError {
-  readonly reviewId?: string;
-
-  constructor(message: string, reviewId?: string) {
+  constructor(message: string) {
     super(409, message);
     this.name = 'ReviewConflictError';
-    this.reviewId = reviewId;
   }
 }
 

@@ -16,11 +16,16 @@ import { myReviewQueryKey } from '@/hooks/use-my-review';
  *
  * Uses a raw `fetch`, not `apiFetch`: `apiFetch`'s `ApiError` collapses
  * every error body down to `{ message, code }`, which would silently drop
- * the 409's `reviewId` and the 429's `Retry-After` header — both of which
- * this function turns into `ReviewConflictError`/`RateLimitedError` below
- * specifically so a caller doesn't lose them.
+ * the 429's numeric `Retry-After` header — this function reads it
+ * straight off the `Response` and turns it into `RateLimitedError` below
+ * specifically so a caller doesn't lose it.
+ *
+ * Exported (not just used internally) so its status-code branches — the
+ * part of this file most likely to hide a bug — can be exercised
+ * directly in tests, against a mocked `fetch`, without going through
+ * `useSubmitReview`'s React Query plumbing. See use-submit-review.test.ts.
  */
-async function submitReview(productId: string, input: CreateReviewInput): Promise<ReviewDto> {
+export async function submitReview(productId: string, input: CreateReviewInput): Promise<ReviewDto> {
   const response = await fetch(`/api/products/${productId}/reviews`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -41,8 +46,7 @@ async function submitReview(productId: string, input: CreateReviewInput): Promis
           : `Submitting the review failed (status ${response.status}).`;
 
     if (response.status === 409) {
-      const reviewId = typeof record.reviewId === 'string' ? record.reviewId : undefined;
-      throw new ReviewConflictError('You have already reviewed this product.', reviewId);
+      throw new ReviewConflictError('You have already reviewed this product.');
     }
 
     if (response.status === 429) {
