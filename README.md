@@ -170,15 +170,29 @@ With the stack running from the quick start above:
 
 Requires Node 22 (pinned in `.nvmrc`) and pnpm.
 
+Set up once:
+
 ```bash
 pnpm install
 pnpm infra:up          # Postgres, Redis, RabbitMQ only — no app containers
 cp .env.example .env   # points at localhost — correct for this mode
 pnpm --filter @reviews/db db:migrate
 pnpm --filter @reviews/db db:seed
-pnpm --filter @reviews/api start:dev     # http://localhost:3001
-pnpm --filter @reviews/worker start:dev
-pnpm --filter @reviews/web start:dev     # http://localhost:3000
+```
+
+Then start the three processes, **each in its own terminal**. Every one of
+them runs in the foreground and stays there, watching for changes:
+
+```bash
+pnpm --filter @reviews/api start:dev       # http://localhost:3001
+```
+
+```bash
+pnpm --filter @reviews/worker start:dev    # no HTTP surface — logs to stdout
+```
+
+```bash
+pnpm --filter @reviews/web start:dev       # http://localhost:3000
 ```
 
 The API and the worker read that `.env` because their `start:dev` scripts
