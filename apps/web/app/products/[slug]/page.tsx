@@ -5,6 +5,7 @@ import { productDetailDtoSchema, type ProductDetailDto } from '@reviews/contract
 import { RatingStars } from '@/components/rating-stars';
 import { ReviewList } from '@/components/review-list';
 import { SignOutButton } from '@/components/sign-out-button';
+import { WriteReviewSection } from '@/components/write-review-section';
 import { apiFetch } from '@/lib/api-client';
 import { ApiError } from '@/lib/errors';
 import { getServerSession } from '@/lib/session';
@@ -108,6 +109,8 @@ export default async function ProductPage({ params }: ProductPageProps): Promise
             <p className="text-sm text-foreground/90">{product.description}</p>
           </div>
         </div>
+
+        <WriteReviewSection productId={product.id} isSignedIn={user !== null} />
 
         <ReviewList productId={product.id} summary={product.summary} />
       </main>
