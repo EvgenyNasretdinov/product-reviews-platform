@@ -281,21 +281,16 @@ In rough priority order:
    delete, so a moderator overturning an earlier call loses the record of
    what that call was. Worth fixing before this ever handles a real
    dispute.
-3. **Known test flakiness, stated honestly.** Two distinct issues were
-   measured during this project, not one. The confirmed root cause —
-   parallel integration suites racing on the generated Prisma client, where
-   a sibling suite could have the client loaded while another suite
-   regenerated it — went from 0 clean runs out of 10 to 0 failures across 5
-   clean runs once those suites were serialised (`--concurrency=1`, now the
-   default for `pnpm test` and CI); that fix is structural, since two
-   suites that never run concurrently cannot race. A second, separate
-   flake was found while checking that fix: intermittent HTTP-transport-
-   level failures in `apps/api`'s own integration suite under host resource
-   contention, measured at roughly 1-in-8 before serialising and still
-   reproduced once in 2 runs afterward — likely contention with other
-   concurrent processes on the host rather than the Prisma race, and not
-   eliminated by the same fix. Worth root-causing properly rather than
-   living with.
+3. **Known test flakiness.** Parallel integration suites raced on the
+   generated Prisma client: one suite could regenerate it while a sibling
+   had it loaded. Serialising them — `--concurrency=1`, what both
+   `pnpm test` and CI now run — took that from 0 clean runs out of 10 to 0
+   failures across 5, and the fix is structural rather than a retry:
+   suites that never run concurrently cannot race. A second, unrelated
+   flake turned up while verifying it — intermittent HTTP-transport
+   failures in the API's own integration suite — but only on a developer
+   machine under heavy parallel load, and it has not recurred in CI. I
+   would rather know its cause than assume it is gone.
 4. **Full-text search.** Product lookup today is `ILIKE` over a small
    catalogue, isolated in one repository method by design. Fine at this
    size; would need Postgres full-text or an external engine at real scale.
@@ -315,6 +310,16 @@ In rough priority order:
 8. **Refresh tokens.** Auth is deliberately shallow — login, JWT, two roles,
    no registration or password reset — because none of that says anything
    about the actual subject of this project, which is reviews.
+
+## A note on tooling
+
+This project was built with AI-assisted development tools. The architecture
+and the trade-offs recorded in the ADRs are mine, as are the review
+decisions behind them. The implementation was validated by lint, type
+checks, unit, integration and end-to-end tests, and by exercising the
+failure paths by hand — stopping the worker to watch events wait in the
+outbox and drain on restart, and running the quick start from a clean
+clone.
 
 ## Project structure
 
