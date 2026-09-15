@@ -14,7 +14,6 @@ product's rating.
 ```bash
 git clone <this-repository-url>
 cd product-reviews-platform
-cp .env.example .env
 docker compose up -d --wait
 ```
 
@@ -22,6 +21,12 @@ Open **http://localhost:3000**. `docker compose up` builds all three
 application images, starts Postgres, Redis, and RabbitMQ, runs migrations
 and seeds the database as a one-shot job, then starts the API, the worker,
 and the web app — nothing else needs to run first.
+
+There is deliberately no `cp .env.example .env` step here. `docker-compose.yml`
+carries every value it needs literally, with no variable interpolation, so a
+`.env` file would be read by nothing on this path — copying one would only
+create the impression that editing it changes something. `.env` matters for
+the host-based workflow under [Development](#development) below.
 
 | Email | Password | Role |
 |---|---|---|
@@ -49,11 +54,11 @@ worker process is what actually publishes:
 
 ```mermaid
 graph TD
-    A["POST /reviews"] --> B["tx: INSERT review (PENDING)\n+ INSERT outbox event"]
-    B --> C["outbox relay\nSELECT ... FOR UPDATE SKIP LOCKED"]
-    C --> D["RabbitMQ topic exchange\nreviews.events"]
-    D --> E["moderation consumer\nclassify() -> UPDATE review status\n+ INSERT outbox event"]
-    D --> F["aggregation consumer\nrecompute product_rating_summary\nDEL cache keys"]
+    A["POST /reviews"] --> B["tx: INSERT review (PENDING)<br/>+ INSERT outbox event"]
+    B --> C["outbox relay<br/>SELECT ... FOR UPDATE SKIP LOCKED"]
+    C --> D["RabbitMQ topic exchange<br/>reviews.events"]
+    D --> E["moderation consumer<br/>classify() -> UPDATE review status<br/>+ INSERT outbox event"]
+    D --> F["aggregation consumer<br/>recompute product_rating_summary<br/>DEL cache keys"]
 ```
 
 - **`apps/api`** — NestJS HTTP service. Owns every write and the outbox.
@@ -100,11 +105,14 @@ With the stack running from the quick start above:
    ```
 
    Submit a review through the UI or the API — `bob@example.com` on the
-   [Ergonomic Mesh Office
-   Chair](http://localhost:3000/products/ergonomic-mesh-office-chair)
-   works, or use any product/account pair the seed hasn't already paired
-   up. It stays `PENDING` — nothing
-   is consuming the outbox. Confirm the row is sitting there unpublished:
+   [Portable Bluetooth
+   Speaker](http://localhost:3000/products/portable-bluetooth-speaker)
+   works, and is still free after step 2. One review per person per
+   product is enforced by a unique constraint, so if you reuse a pair the
+   seed already used you'll get a `409` instead; the pairs suggested in
+   these steps are chosen to avoid that. The review stays `PENDING` —
+   nothing is consuming the outbox. Confirm the row is sitting there
+   unpublished:
 
    ```bash
    docker compose exec postgres psql -U reviews -d reviews \
@@ -294,6 +302,7 @@ docker-compose.yml        the whole system — one command to a working environm
 docker-compose.dev.yml    infrastructure only — Postgres/Redis/RabbitMQ, apps run on the host
 scripts/                  smoke.sh (post-startup health check) and check-infra.sh
 docs/design               the authoritative design document
+docs/plans                the implementation plans these were built from
 docs/adr                  architecture decision records — the rejected alternatives live here
 docs/images               the screenshot above
 .github/workflows/ci.yml  lint/typecheck/unit, integration (Testcontainers), and e2e (Compose + Playwright), as separate jobs
